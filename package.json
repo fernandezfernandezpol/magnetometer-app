@@ -1,0 +1,68 @@
+{
+  "name": "mobile-magnetometer",
+  "version": "1.0.0",
+  "description": "Real-time magnetometer telemetry — Android phone to PC dashboard over WebSocket",
+  "author": {
+    "name": "Pol Fernández Fernández",
+    "email": "fernandezfernandezpol@gmail.com"
+  },
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "electron": "electron .",
+    "build": "electron-builder --win --x64",
+    "build:linux": "electron-builder --linux --x64"
+  },
+  "build": {
+    "appId": "com.mobilemagnetometer.app",
+    "productName": "Mobile Magnetometer",
+    "asar": true,
+    "directories": {
+      "output": "dist-app"
+    },
+    "icon": "build/icon.png",
+    "win": {
+      "target": "nsis",
+      "artifactName": "Mobile-Magnetometer-Setup.exe",
+      "requestedExecutionLevel": "asInvoker",
+      "sign": null,
+      "forceCodeSigning": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "linux": {
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] },
+        { "target": "deb",      "arch": ["x64"] }
+      ],
+      "artifactName": "Mobile-Magnetometer.${ext}",
+      "category": "Science"
+    },
+    "files": [
+      "main.js",
+      "mobile/index.html",
+      "mobile/app.js",
+      "mobile/styles.css",
+      "mobile/compass.png",
+      "mobile/manifest.json",
+      "mobile/sw.js",
+      "pc/server.js",
+      "pc/dashboard.html",
+      "node_modules/**"
+    ]
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.0.0",
+    "@capacitor/core": "^6.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.0.0",
+    "electron": "^30.0.0",
+    "electron-builder": "^24.0.0"
+  }
+}

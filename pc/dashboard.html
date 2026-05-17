@@ -1,0 +1,1906 @@
+<!DOCTYPE html>
+<!--
+  =============================================================================
+  Mobile Magnetometer — PC Dashboard  (server/dashboard.html)
+  =============================================================================
+  This is the desktop UI that runs inside the Electron app window, and is also
+  accessible at https://localhost:8443/dashboard from any browser on the LAN.
+
+  Role in the system:
+    - Connects to the server via WebSocket at /dashboard.
+    - Displays live magnetometer data streamed from the phone in real time.
+    - Renders a scrolling line chart of up to 600 samples (MAX_PTS).
+    - Shows per-axis running statistics (min, max, mean, std-dev).
+    - Controls recording start/stop and marker insertion, mirroring the phone's
+      physical buttons (the authoritative recording state lives on the server).
+    - Lists saved CSV recordings with download and delete actions via REST API.
+    - Provides an auto-save toggle that persists to server/config.json.
+
+  Layout (VS Code-inspired):
+    ┌──────────────────────────────────────────────────────────────┐
+    │ Activity bar (48 px) │  Title bar                           │
+    │                      │  Tab bar                             │
+    │  ≋  live             │  Header row (status badges)          │
+    │  ≡  recordings       │  Body:                               │
+    │  ⚙  settings (↓)    │    Left: readout panels + chart      │
+    │                      │    Right: rec controls / list / cfg  │
+    │                      │  Status bar (22 px, accent blue)     │
+    └──────────────────────────────────────────────────────────────┘
+
+  The right-hand column is a set of "panels" tagged with data-for-view="…".
+  switchView() reads those tags to decide which panels to show or hide when
+  the user clicks an activity-bar icon.
+
+  Self-contained: zero external dependencies — no framework, no bundler.
+  =============================================================================
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mobile Magnetometer — PC Dashboard</title>
+<!-- App icon served from mobile/ via the static file handler -->
+<link rel="icon" type="image/png" href="/compass.png">
+<style>
+/* =============================================================================
+   Mobile Magnetometer — PC Dashboard CSS
+   VS Code-inspired dark aesthetic.
+   =============================================================================
+
+   THEME — identical colour encoding to mobile/styles.css:
+     Background:  --bg #1e1e1e, --panel #252526, --panel2 #2d2d2d
+     Activity bar: --actbar #333333 (slightly lighter than the editor bg)
+     Title bar:   --titlebar #323233
+     Borders:     --border #3e3e42, --border-focus #007acc (focus blue)
+     Text:        --main #cccccc, --dim #858585, --bright #d4d4d4
+
+   Axis colours (same as the phone app):
+     --x   #ce9178  warm orange  (X axis)
+     --y   #4ec9b0  teal         (Y axis)
+     --z   #9cdcfe  sky blue     (Z axis)
+     --mag #c586c0  purple       (|B| total field)
+
+   Semantic:
+     --ok     teal   connected / recording armed
+     --err    red    disconnected / recording active
+     --warn   yellow transitional
+     --accent #007acc  VS Code blue — active indicators, focus, status bar
+   ============================================================================= */
+
+/* ── CSS custom properties (design tokens) ────────────────────────────────── */
+:root {
+    --bg:          #1e1e1e;
+    --panel:       #252526;
+    --panel2:      #2d2d2d;
+    --actbar:      #333333;
+    --titlebar:    #323233;
+    --border:      #3e3e42;
+    --border-focus:#007acc;
+    --main:        #cccccc;
+    --dim:         #858585;
+    --bright:      #d4d4d4;
+    --x:   #ce9178;
+    --y:   #4ec9b0;
+    --z:   #9cdcfe;
+    --mag: #c586c0;
+    --ok:  #4ec9b0;
+    --err: #f44747;
+    --warn:#dcdcaa;
+    --accent: #007acc;
+    --mono: 'Consolas', 'Courier New', monospace;
+}
+
+/* ── Global reset ─────────────────────────────────────────────────────────── */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* Lock the entire document to the viewport — no page-level scrolling.
+   All scrollable regions are explicit overflow:auto children (e.g. #list-scroll). */
+html, body {
+    width: 100%; height: 100%;
+    background: var(--bg);
+    color: var(--main);
+    font-family: -apple-system, 'Segoe UI', system-ui, sans-serif;
+    font-size: 13px;
+    overflow: hidden;
+}
+
+/* ── App: activity bar + shell ───────────────────────────────────────────── */
+/*
+   The top-level layout is a horizontal flex row:
+     [activity-bar 48 px] [shell flex:1]
+   The shell then splits vertically into title bar / tabs / content / status bar.
+*/
+#app {
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+}
+
+/* ── Activity bar ─────────────────────────────────────────────────────────── */
+/*
+   48 px wide vertical strip on the far left, matching VS Code's activity bar.
+   Holds three icon buttons (.act-icon) that switch between the "live",
+   "recordings", and "settings" views via switchView().
+
+   flex-shrink:0 prevents the bar from narrowing when the shell grows.
+*/
+.activity-bar {
+    width: 48px;
+    background: var(--actbar);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 8px;
+    gap: 2px;
+    flex-shrink: 0;
+}
+
+/*
+   Each icon button in the activity bar.
+   border-left: 2px solid transparent reserves the space for the active-state
+   indicator without shifting sibling elements when it becomes coloured.
+   cursor:default keeps the system pointer rather than a text cursor, matching
+   VS Code's own activity bar behaviour.
+*/
+.act-icon {
+    width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--dim);
+    font-size: 17px;
+    border-radius: 4px;
+    cursor: default;
+    border-left: 2px solid transparent;
+    transition: color 0.15s;
+    user-select: none;
+}
+/* Active icon: bright text + accent-blue left border (VS Code convention) */
+.act-icon.active { color: var(--bright); border-left-color: var(--accent); }
+.act-icon:hover  { color: var(--bright); }
+/* Settings gear is pushed to the bottom of the bar with margin-top:auto */
+.act-icon.act-bottom { margin-top: auto; margin-bottom: 8px; }
+
+/* ── Main shell ───────────────────────────────────────────────────────────── */
+/*
+   The flex:1 column to the right of the activity bar.
+   min-width:0 prevents it from overflowing its flex container when content
+   is wide (a common flex gotcha).
+*/
+.shell {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+}
+
+/* ── Title bar ────────────────────────────────────────────────────────────── */
+/*
+   30 px tall strip mimicking VS Code's editor breadcrumb bar.
+   Shows:  Mobile Magnetometer / telemetry › live
+   Purely decorative — the breadcrumb text is static HTML and does not update
+   dynamically when views switch.
+*/
+.titlebar {
+    height: 30px;
+    background: var(--titlebar);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    gap: 6px;
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--dim);
+}
+
+/* "Mobile Magnetometer" in slightly brighter text than the breadcrumb separators */
+.titlebar-name { color: var(--bright); font-size: 12px; }
+/* "/" and "›" separator glyphs, reduced opacity so they read as punctuation */
+.bc-sep  { opacity: 0.5; margin: 0 2px; }
+.bc-arrow { opacity: 0.5; margin: 0 3px; }
+/* The final breadcrumb segment (current location) is bright */
+.breadcrumb span:last-child { color: var(--bright); }
+
+/* ── Tab bar ──────────────────────────────────────────────────────────────── */
+/*
+   35 px row of VS Code-style editor tabs.  Currently only one tab exists:
+   "magnetometer.live".  The active tab has:
+     - lighter panel background (--panel vs --panel2)
+     - bright text
+     - 1 px accent-blue top border (the "active" indicator)
+     - margin-top:-1px to overlap the tab bar's own bottom border so the blue
+       line meets the border seamlessly.
+*/
+.tabs {
+    height: 35px;
+    background: var(--panel2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: stretch;
+    flex-shrink: 0;
+}
+
+.tab {
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--dim);
+    border-right: 1px solid var(--border);
+    cursor: default;
+    white-space: nowrap;
+    background: var(--panel2);
+}
+.tab.active {
+    background: var(--panel);
+    color: var(--bright);
+    border-top: 1px solid var(--accent);
+    margin-top: -1px;
+}
+
+/* Small dot inside the tab that mirrors phone connection status:
+   default = ok (teal), .err = disconnected (red) */
+.tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+.tab-dot.err { background: var(--err); }
+
+/* ── Content area ─────────────────────────────────────────────────────────── */
+/*
+   The main scrollable region between the tab bar and the status bar.
+   flex:1 + min-height:0 lets it absorb all remaining vertical space without
+   overflowing.  overflow:hidden defers scrolling to inner elements.
+*/
+.content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 12px;
+    gap: 10px;
+    overflow: hidden;
+    min-height: 0;
+}
+
+/* ── Header row (status badges) ───────────────────────────────────────────── */
+/*
+   A single flex row of badge-style pills at the top of the content area:
+     [MOBILE MAGNETOMETER]  [SENSOR: DISCONNECTED]  [NOT RECORDING]  [AUTO-SAVE: ON]
+   JS updates the text and colour class of each badge as state changes.
+   flex-wrap:wrap allows the badges to reflow if the window is very narrow.
+*/
+#header-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+/* Branded accent-blue badge — static "MOBILE MAGNETOMETER" label */
+.sys-badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 1.5px;
+    color: var(--accent);
+    background: rgba(0, 122, 204, 0.12);
+    padding: 3px 8px;
+    border-radius: 3px;
+    border: 1px solid rgba(0, 122, 204, 0.3);
+}
+
+/*
+   Generic status badge.  Base state: dim grey border/text.
+   JS applies modifier classes:
+     .ok   — teal  (sensor connected, auto-save on)
+     .err  — red   (sensor disconnected, recording active as a blink)
+     .rec  — red + blink animation (recording-in-progress badge)
+*/
+.badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 1px;
+    padding: 3px 8px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    color: var(--dim);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+.badge.ok  { color: var(--ok);  border-color: rgba(78, 201, 176, 0.4); background: rgba(78, 201, 176, 0.08); }
+.badge.err { color: var(--err); border-color: rgba(244, 71, 71, 0.4);  background: rgba(244, 71, 71, 0.08); }
+/* .rec blinks at 1 s to draw attention to an active recording */
+.badge.rec { color: var(--err); border-color: rgba(244, 71, 71, 0.4);  animation: blink 1s infinite; }
+
+/* Shared blink keyframe — fades to 30% opacity at the midpoint of each cycle */
+@keyframes blink { 50% { opacity: 0.3; } }
+
+/* ── Body: live + right ───────────────────────────────────────────────────── */
+/*
+   Horizontal flex row inside .content:
+     [#live flex:1]  [#right 300 px fixed]
+   min-height:0 is essential — without it flex children cannot shrink below
+   their intrinsic content height, causing the layout to overflow the viewport.
+*/
+#body {
+    display: flex;
+    flex: 1;
+    gap: 10px;
+    min-height: 0;
+}
+
+/* ── Left — live telemetry ────────────────────────────────────────────────── */
+/*
+   The left column holds the four axis readout panels and the canvas chart.
+   flex:1 + min-width:0 lets it grow to fill all horizontal space not claimed
+   by #right.
+*/
+#live { display: flex; flex-direction: column; flex: 1; gap: 10px; min-width: 0; }
+
+/* Four-column grid of axis readout panels (X, Y, Z, |B|).
+   Fixed repeat(4,1fr) because the desktop always has enough width; unlike the
+   phone layout, there is no auto-fit fallback needed here. */
+#readouts {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+/* ── Panel ────────────────────────────────────────────────────────────────── */
+/* Base card style shared by all panels */
+.panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 14px;
+    position: relative;
+}
+
+/*
+   Coloured axis label pill (e.g. "AXIS-X", "AXIS-Y").
+   cursor:pointer + user-select:none signal that clicking toggles the axis.
+   border: 1px solid currentColor inherits the colour of whatever .lx/.ly/… class
+   is applied alongside, avoiding a redundant border-color rule per axis.
+   margin-bottom:10px separates the label from the numeric readout below.
+*/
+.p-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+    padding: 1px 5px;
+    border-radius: 2px;
+    border: 1px solid currentColor;
+    display: inline-block;
+    margin-bottom: 10px;
+    background: rgba(0, 0, 0, 0.2);
+    cursor: pointer;
+    user-select: none;
+    transition: opacity 0.2s;
+}
+.p-label:hover { opacity: 0.7; }
+
+/* Large monospace numeric readout.
+   font-variant-numeric: tabular-nums prevents horizontal jitter as values change. */
+.p-val  {
+    font-family: var(--mono);
+    font-size: 2.4rem;
+    font-weight: 300;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -1px;
+}
+/* Small "μT" unit label after the value */
+.p-unit { font-family: var(--mono); font-size: 11px; color: var(--dim); margin-left: 4px; }
+
+/* Thin horizontal progress bar indicating signal magnitude (clamped to ±100 μT).
+   .bar-track: the grey rail.  .bar-fill: the coloured indicator, width set by JS. */
+.bar-track { width: 100%; height: 2px; background: rgba(255,255,255,0.06); border-radius: 1px; margin: 10px 0; }
+.bar-fill  { height: 100%; width: 0; border-radius: 1px; transition: width 0.1s linear; opacity: 0.75; }
+
+/* ── Axis colour utilities ────────────────────────────────────────────────── */
+/*
+   Four sets of colour helpers, each applied to different element roles:
+     .cx/.cy/.cz/.cm   — CSS color for the numeric readout spans
+     .lx/.ly/.lz/.lm   — tinted label badge (text + faint bg + border)
+     .bx/.by/.bz       — solid background for the bar fills
+   These classes are combined in HTML: e.g. <div class="p-label lx">AXIS-X</div>
+*/
+.cx { color: var(--x); } .cy { color: var(--y); } .cz { color: var(--z); } .cm { color: var(--mag); }
+.lx { color: var(--x); background: rgba(206,145,120,0.1); border-color: rgba(206,145,120,0.3); }
+.ly { color: var(--y); background: rgba(78,201,176,0.1);  border-color: rgba(78,201,176,0.3); }
+.lz { color: var(--z); background: rgba(156,220,254,0.1); border-color: rgba(156,220,254,0.3); }
+.lm { color: var(--mag); background: rgba(197,134,192,0.1); border-color: rgba(197,134,192,0.3); }
+.bx { background: var(--x); } .by { background: var(--y); } .bz { background: var(--z); }
+
+/* ── Statistics grid inside each readout panel ────────────────────────────── */
+/*
+   Four cells per panel in a 4-column micro-grid: MIN, MAX, μ (mean), σ (std-dev).
+   All values are computed from the rolling 600-sample buffer in JS.
+*/
+.stats-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 3px;
+    margin-top: 8px;
+}
+.stat-cell {
+    display: flex; flex-direction: column; align-items: center; gap: 1px;
+    background: rgba(0, 0, 0, 0.2); padding: 3px 2px; border-radius: 2px;
+}
+/* 9 px label row — MIN / MAX / μ / σ */
+.stat-lbl { font-family: var(--mono); font-size: 9px; letter-spacing: 0.5px; color: var(--dim); line-height: 1; }
+/* 11 px tabular numeric value */
+.stat-val { font-family: var(--mono); font-size: 11px; color: var(--bright); font-variant-numeric: tabular-nums; line-height: 1.3; }
+
+/* ── Chart panel ──────────────────────────────────────────────────────────── */
+/*
+   The chart panel is the bottom half of the live column.
+   flex:1 makes it grow to fill all vertical space not taken by #readouts.
+   The canvas (#chart) is absolutely positioned inside #chart-area so JS can
+   set its intrinsic pixel size from the container's clientWidth/clientHeight,
+   enabling crisp device-pixel-ratio-aware rendering.
+*/
+#chart-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 14px;
+}
+
+/* Row above the canvas: "Real-time trace" label on the left, legend on the right */
+.chart-topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    flex-shrink: 0;
+}
+
+/* "REAL-TIME TRACE" label */
+.chart-title-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+/* Legend row — pushed to the right with margin-left:auto */
+#chart-legend {
+    display: flex;
+    gap: 14px;
+    margin-left: auto;
+}
+/* Individual legend entry: coloured swatch + axis label.
+   cursor:pointer signals that clicking toggles the axis on/off. */
+.leg {
+    font-family: var(--mono);
+    font-size: 11px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--dim);
+    cursor: pointer;
+    transition: color 0.15s;
+    user-select: none;
+}
+.leg:hover { color: var(--bright); }
+/* The short coloured horizontal line swatch next to the axis label */
+.swatch { width: 16px; height: 2px; border-radius: 1px; }
+
+/*
+   #chart-area: the sized container for the <canvas> element.
+   The dual linear-gradient background produces a subtle dot-grid that
+   reinforces the "oscilloscope" aesthetic.
+   border: 1px solid rgba(255,255,255,0.04) — barely visible boundary.
+   overflow:hidden ensures the absolutely-positioned canvas stays clipped
+   within the rounded corners.
+*/
+#chart-area {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+    border-radius: 3px;
+    border: 1px solid rgba(255,255,255,0.04);
+    overflow: hidden;
+    background: rgba(0,0,0,0.2);
+    background-image:
+        linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+    background-size: 32px 32px;
+}
+
+/* Canvas fills its absolutely-positioned container; JS sets its intrinsic size */
+#chart { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+
+/* ── Right — recording controls + recordings list ─────────────────────────── */
+/*
+   Fixed 300 px right column.  It contains multiple "right-panel" divs, each
+   tagged with data-for-view="…".  switchView() shows/hides them.
+   flex-shrink:0 keeps the column at 300 px regardless of content.
+*/
+#right { display: flex; flex-direction: column; gap: 10px; width: 300px; flex-shrink: 0; }
+
+/* Recording controls panel — always visible in "live" view */
+#rec-panel { padding: 16px; }
+
+/* Small ALL-CAPS monospace section heading inside a right panel */
+.section-title {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 2px;
+    color: var(--dim);
+    text-transform: uppercase;
+    margin-bottom: 14px;
+}
+
+/* Row holding the START RECORDING and MARK buttons side by side */
+.rec-btn-row { display: flex; gap: 8px; }
+
+/*
+   Primary recording toggle button.
+   Default state: teal border/text = "ready to record".
+   JS adds .recording class when a session is active, switching to red style.
+*/
+#btn-rec {
+    flex: 1; padding: 10px;
+    font-family: var(--mono); font-size: 0.82rem; font-weight: bold;
+    letter-spacing: 1.5px; cursor: pointer;
+    border: 1px solid var(--ok); background: transparent; color: var(--ok);
+    border-radius: 3px; transition: all 0.15s;
+}
+#btn-rec:hover         { background: rgba(78, 201, 176, 0.1); }
+/* When a recording is active the button turns red — mirrors the phone's REC button */
+#btn-rec.recording     { border-color: var(--err); color: var(--err); }
+#btn-rec.recording:hover { background: rgba(244, 71, 71, 0.1); }
+
+/* MARK button — inserts a timestamped event marker into the CSV */
+#btn-mark {
+    padding: 10px 14px;
+    font-family: var(--mono); font-size: 0.8rem; font-weight: bold;
+    letter-spacing: 1px; cursor: pointer;
+    border: 1px solid var(--border); background: transparent; color: var(--dim);
+    border-radius: 3px; transition: all 0.15s;
+}
+#btn-mark:hover { border-color: var(--warn); color: var(--warn); background: rgba(220,220,170,0.08); }
+
+/* Status text below the buttons: filename and sample count during recording */
+#rec-info {
+    margin-top: 10px; font-family: var(--mono); font-size: 11px;
+    color: var(--dim); min-height: 34px; line-height: 1.7; white-space: pre-line;
+}
+
+/* Auto-save toggle row, separated from the button row by a hairline divider */
+#autosave-row {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 14px; padding-top: 14px;
+    border-top: 1px solid var(--border);
+}
+
+/* "AUTO-SAVE recordings" text label beside the toggle */
+.toggle-label { font-family: var(--mono); font-size: 11px; letter-spacing: 1px; color: var(--main); }
+
+/*
+   Custom CSS toggle switch — a <label> wrapping a hidden <input type=checkbox>.
+   Three layers:
+     .toggle-track  — the rounded pill background (grey → teal when checked)
+     .toggle-thumb  — the sliding white circle (left:2px → left:18px when checked)
+   Transitions on background and left give smooth animation.
+*/
+.toggle { position: relative; width: 36px; height: 20px; cursor: pointer; }
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle-track {
+    position: absolute; inset: 0;
+    background: var(--border); border-radius: 20px; transition: background 0.2s;
+}
+.toggle input:checked + .toggle-track { background: var(--ok); }
+.toggle-thumb {
+    position: absolute; left: 2px; top: 2px;
+    width: 16px; height: 16px;
+    background: var(--bright); border-radius: 50%; transition: left 0.2s;
+}
+.toggle input:checked ~ .toggle-thumb { left: 18px; }
+
+/* Saved recordings list panel.
+   flex:1 + overflow:hidden lets #list-scroll handle vertical scrolling. */
+#list-panel {
+    padding: 16px; flex: 1;
+    display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+}
+
+/* Scrollable inner container for the recordings list.
+   Custom 4 px scrollbar to match the dark theme. */
+#list-scroll { flex: 1; overflow-y: auto; margin-top: 8px; }
+#list-scroll::-webkit-scrollbar       { width: 4px; }
+#list-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* Each saved recording row: name + metadata + action buttons */
+.rec-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 0; border-bottom: 1px solid var(--border);
+}
+.rec-item:last-child { border-bottom: none; }
+
+/* Filename, truncated with ellipsis if too long */
+.rec-name {
+    font-family: var(--mono); font-size: 11px; color: var(--main);
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* "N samples · X KB" metadata */
+.rec-meta {
+    font-family: var(--mono); font-size: 10px; color: var(--dim);
+    white-space: nowrap; flex-shrink: 0;
+}
+/* Download + Delete button container */
+.rec-actions { display: flex; gap: 4px; flex-shrink: 0; }
+
+/* Small icon-style action buttons (↓ download, ✕ delete).
+   .del variant turns red on hover to signal a destructive action. */
+.icon-btn {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--dim); font-size: 11px; font-family: var(--mono);
+    padding: 2px 7px; border-radius: 3px; cursor: pointer; transition: all 0.15s;
+}
+.icon-btn:hover      { color: var(--bright); border-color: var(--main); }
+.icon-btn.del:hover  { color: var(--err);    border-color: var(--err); }
+
+/* Shown when the recordings list is empty */
+.empty-msg {
+    font-family: var(--mono); font-size: 11px;
+    color: var(--dim); text-align: center; margin-top: 20px;
+}
+
+/* ── Axis toggle ──────────────────────────────────────────────────────────── */
+/*
+   [data-toggle] elements (p-labels and legend items) are click targets.
+   When JS calls toggleAxis() the element and its corresponding panel receive
+   .axis-off, which fades them visually to indicate the axis is hidden from
+   the chart but still being received from the sensor.
+*/
+[data-toggle]       { cursor: pointer; user-select: none; transition: opacity 0.2s; }
+[data-toggle]:hover { opacity: 0.7; }
+/* The whole readout panel dims when the axis is off */
+.panel.axis-off     { opacity: 0.2; }
+/* The label/legend item itself dims + gains a strikethrough */
+.axis-off           { opacity: 0.35; text-decoration: line-through; }
+
+/* ── Status bar ───────────────────────────────────────────────────────────── */
+/*
+   22 px strip at the very bottom of the window, filled with --accent blue
+   (matching VS Code's status bar).  Shows:
+     Left:  WebSocket connection state | total sample count
+     Right: current time (HH:MM:SS, updated every animation frame)
+*/
+.statusbar {
+    height: 22px;
+    background: var(--accent);
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    gap: 16px;
+    flex-shrink: 0;
+}
+
+/* Individual status bar item — white monospace text on the blue background */
+.sb-item {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.9);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--mono);
+    letter-spacing: 0.3px;
+}
+
+/* Pushes the time display to the far right end of the status bar */
+.sb-right { margin-left: auto; }
+
+/* ── Settings panel ───────────────────────────────────────────────────────── */
+/*
+   Shown when the user clicks the ⚙ icon.  Contains the auto-save toggle
+   (duplicated here for convenience) and read-only server info rows.
+*/
+
+/* Hairline horizontal divider between settings sections */
+.settings-divider { height: 1px; background: var(--border); }
+
+/* A key/value information row in the settings panel */
+.info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+}
+/* Left-side key label (dim) and right-side value (bright) */
+.info-key { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.info-val { font-family: var(--mono); font-size: 11px; color: var(--bright); }
+
+/* Only activity-bar icons that have a data-view attribute are interactive;
+   this selector makes the cursor a pointer only on those. */
+.act-icon[data-view] { cursor: pointer; }
+
+/* ── Titlebar compass icon ────────────────────────────────────────────────── */
+.titlebar-icon {
+    width: 16px;
+    height: 16px;
+    object-fit: contain;
+    opacity: 0.8;
+    flex-shrink: 0;
+}
+
+/* ── Disabled recording button (no phone connected) ──────────────────────── */
+#btn-rec:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    border-color: var(--border);
+    color: var(--dim);
+    background: none;
+}
+#btn-rec:disabled:hover { background: none; }
+
+/* ── Disabled delete button (recording in progress for that file) ─────────── */
+.icon-btn:disabled {
+    opacity: 0.25;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+/* ── Loading overlay ──────────────────────────────────────────────────────── */
+#loader {
+    position: fixed;
+    inset: 0;
+    background: #1e1e1e;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    z-index: 9000;
+    transition: opacity 0.4s ease;
+}
+#loader.fade-out { opacity: 0; pointer-events: none; }
+#loader img { width: 72px; height: 72px; object-fit: contain; opacity: 0.9; }
+#loader-text {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--dim);
+    letter-spacing: 0.08em;
+}
+#loader-dots::after {
+    content: '';
+    animation: dots 1.2s steps(3, end) infinite;
+}
+@keyframes dots {
+    0%   { content: '.'; }
+    33%  { content: '..'; }
+    66%  { content: '...'; }
+    100% { content: ''; }
+}
+
+/* ── Confirm modal ────────────────────────────────────────────────────────── */
+#modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9100;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease;
+}
+#modal-backdrop.open { opacity: 1; pointer-events: all; }
+#modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    width: 340px;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+}
+#modal-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--bright);
+}
+#modal-body {
+    font-size: 12px;
+    color: var(--main);
+    line-height: 1.5;
+    word-break: break-all;
+}
+#modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+#modal-cancel, #modal-confirm {
+    padding: 5px 16px;
+    font-family: var(--mono);
+    font-size: 11px;
+    border-radius: 3px;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: none;
+    color: var(--main);
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+#modal-cancel:hover  { background: rgba(255,255,255,0.06); color: var(--bright); }
+#modal-confirm {
+    border-color: var(--err);
+    color: var(--err);
+}
+#modal-confirm:hover { background: rgba(244,71,71,0.12); }
+</style>
+</head>
+<body>
+<!-- Loading overlay — visible until the WebSocket connects for the first time -->
+<div id="loader">
+  <img src="/compass.png" alt="">
+  <div id="loader-text">CONNECTING<span id="loader-dots"></span></div>
+</div>
+
+<!-- Confirm modal — replaces native window.confirm() for delete actions -->
+<div id="modal-backdrop">
+  <div id="modal" role="dialog" aria-modal="true">
+    <div id="modal-title">Delete recording</div>
+    <div id="modal-body"></div>
+    <div id="modal-actions">
+      <button id="modal-cancel">Cancel</button>
+      <button id="modal-confirm">Delete</button>
+    </div>
+  </div>
+</div>
+
+<div id="app">
+
+  <!-- =========================================================================
+       ACTIVITY BAR
+       Three icon buttons that switch which right-column panels are visible.
+       Each button carries a data-view attribute whose value matches the
+       space-separated tokens in data-for-view on the right panels.
+       The active icon gets the .active class (bright text + blue left border).
+       JS in the boot section wires click handlers to each .act-icon[data-view].
+       ========================================================================= -->
+  <div class="activity-bar">
+    <!-- Live telemetry view (default) -->
+    <div class="act-icon active" data-view="live" title="Live">≋</div>
+    <!-- Recordings list view -->
+    <div class="act-icon" data-view="recordings" title="Recordings">≡</div>
+    <!-- Settings view — pushed to the bottom by .act-bottom (margin-top:auto) -->
+    <div class="act-icon act-bottom" data-view="settings" title="Settings">⚙</div>
+  </div>
+
+  <!-- =========================================================================
+       MAIN SHELL
+       Everything to the right of the activity bar: title bar, tabs, content,
+       status bar — laid out as a vertical flex column.
+       ========================================================================= -->
+  <div class="shell">
+
+    <!-- ======================================================================
+         TITLE BAR
+         Static breadcrumb decoration mirroring VS Code's editor header:
+         "Mobile Magnetometer / telemetry › live"
+         Does not update dynamically when the view changes.
+         ====================================================================== -->
+    <div class="titlebar">
+      <img class="titlebar-icon" src="/compass.png" alt="">
+      <span class="titlebar-name">Mobile Magnetometer</span>
+      <span class="bc-sep">/</span>
+      <span class="breadcrumb">telemetry <span class="bc-arrow">›</span> <span>live</span></span>
+    </div>
+
+    <!-- ======================================================================
+         TAB BAR
+         A single VS Code-style editor tab: "magnetometer.live".
+         #tab-dot-sensor is the small coloured circle inside the tab that
+         reflects phone connection status (.err = red when disconnected).
+         The .active class on .tab gives it the blue top border and lighter
+         background that identify the "active file" in VS Code.
+         ====================================================================== -->
+    <div class="tabs">
+      <div class="tab active">
+        <div class="tab-dot err" id="tab-dot-sensor"></div>
+        magnetometer.live
+      </div>
+    </div>
+
+    <!-- Content area: header row + body (live + right panels) -->
+    <div class="content">
+
+      <!-- ====================================================================
+           HEADER ROW — STATUS BADGES
+           Four pill badges updated by JS to reflect live system state:
+             #badge-phone  — phone WebSocket connection (ok / err)
+             #badge-rec    — recording state (plain / rec-blink)
+             #badge-save   — auto-save setting (ok / plain)
+           ==================================================================== -->
+      <div id="header-row">
+        <span class="sys-badge">MOBILE MAGNETOMETER</span>
+        <span id="badge-phone" class="badge err">SENSOR: DISCONNECTED</span>
+        <span id="badge-rec"   class="badge">NOT RECORDING</span>
+        <span id="badge-save"  class="badge ok">AUTO-SAVE: ON</span>
+      </div>
+
+      <!-- Body: left (live telemetry) + right (panels) -->
+      <div id="body">
+
+        <!-- ==================================================================
+             LIVE TELEMETRY PANEL (left column)
+             Contains the four axis readout panels and the canvas chart.
+             ================================================================== -->
+        <div id="live">
+
+          <!-- Four axis readout panels in a 4-column grid -->
+          <div id="readouts">
+
+            <!-- X-axis panel: live value, magnitude bar, rolling statistics -->
+            <div class="panel" id="panel-x">
+              <!-- .p-label has data-toggle="x" → clicking calls toggleAxis("x") -->
+              <div class="p-label lx" data-toggle="x" role="button" title="Toggle X axis">AXIS-X</div>
+              <!-- Live numeric value (#vx updated every rAF) + μT unit -->
+              <div><span id="vx" class="p-val cx">0.00</span><span class="p-unit">μT</span></div>
+              <!-- Magnitude bar: width % = |cur.x| / 100 μT, capped at 100% -->
+              <div class="bar-track"><div id="bx" class="bar-fill bx"></div></div>
+              <!-- Rolling stats from the 600-sample buffer -->
+              <div class="stats-row">
+                <div class="stat-cell"><span class="stat-lbl">MIN</span><span class="stat-val" id="stat-x-min">—</span></div>
+                <div class="stat-cell"><span class="stat-lbl">MAX</span><span class="stat-val" id="stat-x-max">—</span></div>
+                <div class="stat-cell"><span class="stat-lbl">μ</span><span class="stat-val" id="stat-x-mean">—</span></div>
+                <div class="stat-cell"><span class="stat-lbl">σ</span><span class="stat-val" id="stat-x-sd">—</span></div>
+              </div>
+            </div>
+
+            <!-- Y-axis panel (same structure as X) -->
+            <div class="panel" id="panel-y">
+              <div class="p-label ly" data-toggle="y" role="button" title="Toggle Y axis">AXIS-Y</div>
+              <div><span id="vy" class="p-val cy">0.00</span><span class="p-unit">μT</span></div>
+              <div class="bar-track"><div id="by" class="bar-fill by"></div></div>
+              <div class="stats-row">
+                <div class="stat-cell"><span class="stat-lbl">MIN</span><span class="stat-val" id="stat-y-min">—</span></div>
+                <div class="stat-cell"><span class="stat-lbl">MAX</span><span class="stat-val" id="stat-y-max">—</span></div>
+                <div class="stat-cell"><span class="stat-lbl">μ</span><span class="stat-val" id="stat-y-mean">—</span></div>
+                <div class="stat-cell"><span class="stat-lbl">σ</span><span class="stat-val" id="stat-y-sd">—</span></div>
+              </div>
+            </div>
+
+            <!-- Z-axis panel (same structure as X) -->
+            <div class="panel" id="panel-z">
+              <div class="p-label lz" data-toggle="z" role="button" title="Toggle Z axis">AXIS-Z</div>
+              <div><span id="vz" class="p-val cz">0.00</span><span class="p-unit">μT</span></div>
+              <div class="bar-track"><div id="bz" class="bar-fill bz"></div></div>
+              <div class="stats-row">
+                <div class="stat-cell"><span class="stat-lbl">MIN</span><span class="stat-val" id="stat-z-min">—</span></div>
+                <div class="stat-cell"><span class="stat-lbl">MAX</span><span class="stat-val" id="stat-z-max">—</span></div>
+                <div class="stat-cell"><span class="stat-lbl">μ</span><span class="stat-val" id="stat-z-mean">—</span></div>
+                <div class="stat-cell"><span class="stat-lbl">σ</span><span class="stat-val" id="stat-z-sd">—</span></div>
+              </div>
+            </div>
+
+            <!-- |B| total-field panel — no magnitude bar (absolute magnitude
+                 of a signed vector magnitude bar is less meaningful) -->
+            <div class="panel" id="panel-mag">
+              <div class="p-label lm" data-toggle="mag" role="button" title="Toggle |B|">|B| TOTAL</div>
+              <div><span id="vm" class="p-val cm">0.00</span><span class="p-unit">μT</span></div>
+              <div class="stats-row">
+                <div class="stat-cell"><span class="stat-lbl">MIN</span><span class="stat-val" id="stat-m-min">—</span></div>
+                <div class="stat-cell"><span class="stat-lbl">MAX</span><span class="stat-val" id="stat-m-max">—</span></div>
+                <div class="stat-cell"><span class="stat-lbl">μ</span><span class="stat-val" id="stat-m-mean">—</span></div>
+                <div class="stat-cell"><span class="stat-lbl">σ</span><span class="stat-val" id="stat-m-sd">—</span></div>
+              </div>
+            </div>
+          </div><!-- /#readouts -->
+
+          <!-- ================================================================
+               CANVAS CHART PANEL
+               Fills all remaining vertical space via flex:1.
+               The <canvas> is absolutely positioned inside #chart-area so JS
+               can set its intrinsic pixel dimensions from the container size,
+               enabling DPR-aware (retina) rendering.
+               drawChart() is called every animation frame via requestAnimationFrame.
+               ================================================================ -->
+          <div id="chart-panel" class="panel">
+            <!-- Chart header: title on the left, legend on the right -->
+            <div class="chart-topbar">
+              <span class="chart-title-label">Real-time trace</span>
+              <!-- Legend: each .leg has data-toggle matching an axis name.
+                   Clicking calls toggleAxis(), same as the p-labels above. -->
+              <div id="chart-legend">
+                <div class="leg" data-toggle="x"   role="button" title="Toggle X"><span class="swatch" style="background:var(--x)"></span>X</div>
+                <div class="leg" data-toggle="y"   role="button" title="Toggle Y"><span class="swatch" style="background:var(--y)"></span>Y</div>
+                <div class="leg" data-toggle="z"   role="button" title="Toggle Z"><span class="swatch" style="background:var(--z)"></span>Z</div>
+                <div class="leg" data-toggle="mag" role="button" title="Toggle |B|"><span class="swatch" style="background:var(--mag)"></span>|B|</div>
+              </div>
+            </div>
+            <!-- Sized container: JS reads clientWidth/clientHeight from here -->
+            <div id="chart-area">
+              <canvas id="chart"></canvas>
+            </div>
+          </div>
+
+        </div><!-- /#live -->
+
+        <!-- ==================================================================
+             RIGHT COLUMN — SWITCHABLE PANELS
+             Each panel div has class="right-panel" and a data-for-view attribute
+             listing (space-separated) the view names in which it should be visible.
+             switchView(view) iterates all .right-panel elements, splits their
+             data-for-view token list, and shows or hides each panel based on
+             whether the current view name appears in that list.
+
+             This declarative approach means adding a new panel to an existing
+             view requires only adding the view name to data-for-view — no JS
+             changes needed.
+
+             Panel visibility map:
+               data-for-view="live"             → visible only in "live" view
+               data-for-view="live recordings"  → visible in both "live" and "recordings"
+               data-for-view="settings"         → visible only in "settings" view
+             ================================================================== -->
+        <div id="right">
+
+          <!-- Recording controls panel (live view only) -->
+          <div id="rec-panel" class="panel right-panel" data-for-view="live">
+            <div class="section-title">Recording Controls</div>
+            <div class="rec-btn-row">
+              <!-- #btn-rec: toggles between "▶ START RECORDING" and "■ STOP RECORDING".
+                   Clicking sends {type:'start_rec'} or {type:'stop_rec'} over WS.
+                   The server is the source of truth for recording state — the button
+                   label is updated only when the server sends back a 'rec' message. -->
+              <button id="btn-rec" disabled>▶ START RECORDING</button>
+              <!-- #btn-mark: sends {type:'marker'} over WS, which inserts a timestamped
+                   row into the active CSV and broadcasts a 'marker' event back to all
+                   connected dashboards (triggering the "★ MARKED" flash). -->
+              <button id="btn-mark">◆ MARK</button>
+            </div>
+            <!-- Status text: "No active recording." / filename + sample count -->
+            <div id="rec-info">No active recording.</div>
+          </div>
+
+          <!-- Saved recordings list (visible in both "live" and "recordings" views).
+               In "live" view it shows below the recording controls.
+               In "recordings" view it is the only panel and receives flex:1 so it
+               expands to fill the full right column height. -->
+          <div id="list-panel" class="panel right-panel" data-for-view="live recordings">
+            <div class="section-title">Saved Recordings</div>
+            <div id="list-scroll">
+              <!-- Shown when the recordings array from the API is empty -->
+              <div id="empty-msg" class="empty-msg">No recordings.</div>
+              <!-- JS renders .rec-item divs into here via renderList() -->
+              <div id="rec-list"></div>
+            </div>
+          </div>
+
+          <!-- Settings panel (settings view only).
+               display:none is inlined here because switchView() sets display:flex
+               when it becomes visible; without an initial display:none it would be
+               briefly visible before the boot code calls switchView('live'). -->
+          <div id="settings-panel" class="panel right-panel" data-for-view="settings" style="display:none; flex-direction:column; gap:16px;">
+            <div class="section-title">Settings</div>
+            <!-- Auto-save toggle — mirrors the one in rec-panel but accessible
+                 without switching away from the settings view -->
+            <div id="autosave-row">
+              <span class="toggle-label">AUTO-SAVE recordings</span>
+              <label class="toggle">
+                <input type="checkbox" id="chk-autosave" checked>
+                <span class="toggle-track"></span>
+                <span class="toggle-thumb"></span>
+              </label>
+            </div>
+            <div class="settings-divider"></div>
+            <div class="section-title">Server Info</div>
+            <!-- Read-only info rows updated by updateStatusBar() each rAF -->
+            <div class="info-row"><span class="info-key">Connection</span><span class="info-val" id="cfg-ws">WebSocket</span></div>
+            <div class="info-row"><span class="info-key">Total samples</span><span class="info-val" id="cfg-samples">—</span></div>
+            <div class="info-row"><span class="info-key">Buffer size</span><span class="info-val">600 pts</span></div>
+          </div>
+
+        </div><!-- /#right -->
+      </div><!-- /#body -->
+
+    </div><!-- /.content -->
+
+    <!-- ======================================================================
+         STATUS BAR
+         22 px accent-blue strip at the bottom of the window (VS Code style).
+         Items updated each animation frame by updateStatusBar():
+           #sb-ws       — "● WebSocket" (open) or "○ Reconnecting…" (closed)
+           #sb-samples  — total sample count received since page load
+           #sb-time     — current wall-clock time (HH:MM:SS)
+         ====================================================================== -->
+    <div class="statusbar">
+      <div class="sb-item" id="sb-ws">● WebSocket</div>
+      <div class="sb-item" id="sb-samples">— samples</div>
+      <div class="sb-item sb-right" id="sb-time"></div>
+    </div>
+
+  </div><!-- /.shell -->
+</div><!-- /#app -->
+
+<script>
+/*
+ * =============================================================================
+ * Mobile Magnetometer — PC Dashboard Script
+ * =============================================================================
+ * Self-contained IIFE (Immediately Invoked Function Expression): no globals
+ * are leaked, no external libraries are used.
+ *
+ * Responsibilities:
+ *   1. Open and maintain a WebSocket to ws(s)://localhost:8443/dashboard.
+ *   2. Receive live sensor data and maintain a rolling 600-sample buffer.
+ *   3. Render a scrolling multi-line chart onto a <canvas> at every rAF tick.
+ *   4. Update per-axis numeric readouts, magnitude bars, and rolling statistics.
+ *   5. Handle recording start/stop and marker insertion via WS commands.
+ *   6. Fetch and render the list of saved recordings via REST API.
+ *   7. Switch right-column panels when the user clicks activity-bar icons.
+ *   8. Persist per-axis visibility preferences to localStorage.
+ * =============================================================================
+ */
+(function () {
+'use strict';
+
+/* Maximum number of data points retained in each axis buffer.
+   Older points are evicted from the front (shift()) when this limit is hit.
+   600 samples at 50 Hz = 12 seconds of history visible on screen. */
+const MAX_PTS = 600;
+
+/* Canvas drawing colour constants — kept here so the chart code doesn't need
+   to reach into the CSS custom properties at render time.
+   Each axis has a stroke colour (the line) and a fill colour (the area shade). */
+const C = {
+    x:   { stroke: '#ce9178', fill: 'rgba(206, 145, 120, 0.08)' },
+    y:   { stroke: '#4ec9b0', fill: 'rgba(78,  201, 176, 0.08)' },
+    z:   { stroke: '#9cdcfe', fill: 'rgba(156, 220, 254, 0.08)' },
+    mag: { stroke: '#c586c0', fill: 'rgba(197, 134, 192, 0.10)' },
+    /* Grid line colour, Y-axis label colour, zero-line colour */
+    grid: '#2d2d2d', label: '#858585', zero: '#3e3e42',
+};
+
+/* ── Axis visibility ──────────────────────────────────────────────────────── */
+/*
+ * Visibility state for each axis is persisted to localStorage under VIS_KEY.
+ * On first load, all axes default to visible (true).
+ * The || fallback handles a missing or corrupt localStorage entry gracefully.
+ */
+const VIS_KEY = 'mm_dash_visible';
+const visible = JSON.parse(localStorage.getItem(VIS_KEY) || 'null') ||
+    { x: true, y: true, z: true, mag: true };
+
+/*
+ * toggleAxis(axis)
+ * Flips the visibility boolean for the given axis ('x', 'y', 'z', or 'mag'),
+ * persists the new state to localStorage, then calls applyVisibility() to
+ * update the DOM immediately.
+ */
+function toggleAxis(axis) {
+    visible[axis] = !visible[axis];
+    localStorage.setItem(VIS_KEY, JSON.stringify(visible));
+    applyVisibility();
+}
+
+/*
+ * applyVisibility()
+ * Reads the current `visible` object and reflects it in the DOM:
+ *   - The readout panel (#panel-x, etc.) gets .axis-off → fades to 20% opacity.
+ *   - Every element with [data-toggle="x"] (p-label AND legend item) gets
+ *     .axis-off → fades + gains a strikethrough.
+ * Called once at boot and again after every toggleAxis() call.
+ */
+function applyVisibility() {
+    for (const axis of ['x', 'y', 'z', 'mag']) {
+        const on = visible[axis];
+        document.getElementById(`panel-${axis}`)?.classList.toggle('axis-off', !on);
+        document.querySelectorAll(`[data-toggle="${axis}"]`).forEach(el => {
+            el.classList.toggle('axis-off', !on);
+        });
+    }
+}
+
+/* ── State ────────────────────────────────────────────────────────────────── */
+/*
+ * buf — rolling ring buffers, one per axis.  Each is a plain JS array.
+ *       Points are appended by push() and trimmed from the front when length
+ *       exceeds MAX_PTS.  All four arrays are always the same length.
+ *
+ * cur — the most recently received sample, used for the live numeric readouts
+ *       and the magnitude bars.  Updated by the 'data' and 'history' handlers.
+ *
+ * isRecording  — mirrors the server-side recording state, set by the 'rec' msg.
+ * recFile      — filename of the active or most recent recording.
+ * recCount     — sample count in the active recording (updated per 'rec' msg).
+ * totalReceived — cumulative count of all samples received since page load,
+ *                 shown in the status bar and the settings panel.
+ * ws           — the active WebSocket instance, or null before first connect().
+ */
+const buf  = { x: [], y: [], z: [], mag: [] };
+let cur    = { x: 0, y: 0, z: 0, mag: 0 };
+let isRecording  = false;
+let recFile      = '';
+let recCount     = 0;
+let totalReceived = 0;
+let phoneCount   = 0;
+let ws           = null;
+let loaderHidden = false;
+
+/* ── DOM ──────────────────────────────────────────────────────────────────── */
+/* Convenience alias for document.getElementById */
+function $(id) { return document.getElementById(id); }
+
+/* Cache all frequently accessed DOM nodes once at startup to avoid repeated
+   getElementById calls inside the animation loop. */
+const el = {
+    vx: $('vx'), vy: $('vy'), vz: $('vz'), vm: $('vm'),   /* numeric readout spans */
+    bx: $('bx'), by: $('by'), bz: $('bz'),                 /* magnitude bar fills */
+    canvas:     $('chart'),
+    chartArea:  $('chart-area'),
+    badgePhone: $('badge-phone'),
+    badgeRec:   $('badge-rec'),
+    badgeSave:  $('badge-save'),
+    btnRec:     $('btn-rec'),
+    btnMark:    $('btn-mark'),
+    recInfo:    $('rec-info'),
+    chkSave:    $('chk-autosave'),
+    recList:    $('rec-list'),
+    emptyMsg:   $('empty-msg'),
+    tabDot:     $('tab-dot-sensor'),
+    sbWs:       $('sb-ws'),
+    sbSamples:  $('sb-samples'),
+    sbTime:     $('sb-time'),
+};
+
+/* ── WebSocket connection ─────────────────────────────────────────────────── */
+/*
+ * connect()
+ * Opens a WebSocket to the dashboard endpoint on the same host that served
+ * this page.  Uses wss:// when the page itself was loaded over https:// (the
+ * normal case when served by the Node server), ws:// otherwise.
+ *
+ * On close, schedules a reconnect after 2 s — handles server restarts and
+ * Electron app cold starts where the server might not be ready yet.
+ */
+function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/dashboard`);
+
+    ws.onopen = () => {
+        el.sbWs.textContent = '● WebSocket';
+        hideLoader();
+        updateRecUI();   /* enforce disabled state until server confirms phone count */
+    };
+
+    ws.onmessage = ({ data }) => {
+        const msg = JSON.parse(data);
+
+        if (msg.type === 'data') {
+            /*
+             * 'data' — a single real-time sensor sample from the phone.
+             * Fields: x, y, z (μT on each axis), mag (|B| total field), ts (ms).
+             * Update `cur` for the live readouts, then push into the rolling buffer.
+             */
+            cur = { x: msg.x, y: msg.y, z: msg.z, mag: msg.mag };
+            push(msg.x, msg.y, msg.z, msg.mag);
+
+        } else if (msg.type === 'history') {
+            /*
+             * 'history' — bulk replay of the server's 600-sample dataBuf,
+             * sent once immediately after the dashboard WebSocket connects.
+             * Populates the chart with recent data so the display is not empty
+             * when the page loads.  msg.data is an array of {x,y,z,mag} objects.
+             * After replaying, cur is set to the last sample in the replay batch.
+             */
+            for (const pt of msg.data) push(pt.x, pt.y, pt.z, pt.mag);
+            if (msg.data.length) cur = msg.data.at(-1);
+
+        } else if (msg.type === 'rec') {
+            /*
+             * 'rec' — recording state change broadcast from the server.
+             * Sent whenever any client (phone or dashboard) starts or stops a
+             * recording, so all connected dashboards stay in sync.
+             * Fields: recording (bool), file (string), count (int).
+             */
+            isRecording = msg.recording;
+            recFile     = msg.file  || '';
+            recCount    = msg.count || 0;
+            updateRecUI();      /* update button label, badge, info text */
+            loadRecordings();   /* refresh the saved recordings list */
+
+        } else if (msg.type === 'phones') {
+            const n = msg.count;
+            phoneCount = n;
+            el.badgePhone.textContent = n ? `SENSOR: ${n} CONNECTED` : 'SENSOR: DISCONNECTED';
+            el.badgePhone.className   = 'badge ' + (n ? 'ok' : 'err');
+            el.tabDot.className       = 'tab-dot' + (n ? '' : ' err');
+            updateRecUI();
+
+        } else if (msg.type === 'config') {
+            /*
+             * 'config' — server configuration snapshot.
+             * Sent once on WebSocket connect so the dashboard reflects persisted
+             * server settings (e.g. autoSave loaded from server/config.json).
+             * msg.autoSave is a boolean.
+             */
+            el.chkSave.checked = !!msg.autoSave;
+            updateSaveBadge();
+
+        } else if (msg.type === 'marker') {
+            /*
+             * 'marker' — a marker event was inserted into the active recording.
+             * Triggered when any connected client (phone or dashboard) sends a
+             * {type:'marker'} command.  Flash the MARK button briefly so the
+             * user gets confirmation even if another client triggered it.
+             */
+            const orig = el.btnMark.textContent;
+            el.btnMark.textContent = '★ MARKED';
+            setTimeout(() => { el.btnMark.textContent = orig; }, 600);
+        }
+    };
+
+    ws.onclose = () => {
+        /* Show reconnecting state in the status bar, then retry after 2 s */
+        el.sbWs.textContent = '○ Reconnecting…';
+        setTimeout(connect, 2000);
+    };
+}
+
+/*
+ * push(x, y, z, mag)
+ * Appends a new data point to all four rolling buffers simultaneously and
+ * increments the total received counter.  When the buffer exceeds MAX_PTS,
+ * the oldest point is removed from the front of each array (shift()).
+ * All four arrays are always kept the same length so chart rendering can
+ * safely index any axis array by the same index.
+ */
+function push(x, y, z, mag) {
+    buf.x.push(x); buf.y.push(y); buf.z.push(z); buf.mag.push(mag);
+    totalReceived++;
+    if (buf.x.length > MAX_PTS) {
+        buf.x.shift(); buf.y.shift(); buf.z.shift(); buf.mag.shift();
+    }
+}
+
+/* ── Statistics ───────────────────────────────────────────────────────────── */
+/*
+ * calcStats(arr)
+ * Computes min, max, arithmetic mean (μ), and population standard deviation (σ)
+ * over the entire contents of arr in a single linear pass.
+ * Returns null if arr has fewer than 2 elements (avoids misleading single-sample
+ * statistics and division-by-zero edge cases).
+ */
+function calcStats(arr) {
+    if (arr.length < 2) return null;
+    const n = arr.length;
+    let min = arr[0], max = arr[0], sum = 0;
+    for (let i = 0; i < n; i++) {
+        if (arr[i] < min) min = arr[i];
+        if (arr[i] > max) max = arr[i];
+        sum += arr[i];
+    }
+    const mean = sum / n;
+    /* Second pass to compute variance (avoids catastrophic cancellation
+       that can occur with the one-pass algorithm for large values) */
+    let variance = 0;
+    for (let i = 0; i < n; i++) variance += (arr[i] - mean) ** 2;
+    return { min, max, mean, sd: Math.sqrt(variance / n) };
+}
+
+/*
+ * updateStats()
+ * Computes rolling statistics for all four axes and writes the results into
+ * the stat-cell spans inside each readout panel.
+ * Called every animation frame by loop().
+ * The 'axes' array maps buffer keys to the ID prefixes used in the HTML
+ * (e.g. buf.mag → stat-m-min / stat-m-max / …).
+ */
+function updateStats() {
+    const axes = [['x','x'], ['y','y'], ['z','z'], ['mag','m']];
+    for (const [key, prefix] of axes) {
+        const s   = calcStats(buf[key]);
+        const get = id => document.getElementById(id);
+        if (!s) {
+            /* Not enough data yet — show placeholder dashes */
+            ['min','max','mean','sd'].forEach(k => {
+                const e = get(`stat-${prefix}-${k}`);
+                if (e) e.textContent = '—';
+            });
+        } else {
+            const eMin  = get(`stat-${prefix}-min`);
+            const eMax  = get(`stat-${prefix}-max`);
+            const eMean = get(`stat-${prefix}-mean`);
+            const eSd   = get(`stat-${prefix}-sd`);
+            if (eMin)  eMin.textContent  = s.min.toFixed(1);
+            if (eMax)  eMax.textContent  = s.max.toFixed(1);
+            if (eMean) eMean.textContent = s.mean.toFixed(1);
+            /* σ shown to 2 decimal places for finer resolution */
+            if (eSd)   eSd.textContent   = s.sd.toFixed(2);
+        }
+    }
+}
+
+/* ── Recording controls ───────────────────────────────────────────────────── */
+/*
+ * #btn-rec click: send start_rec or stop_rec over WebSocket.
+ * The button label does NOT change here — it changes only when the server
+ * broadcasts back a 'rec' message confirming the state change.  This prevents
+ * the UI from getting out of sync if the server rejects the command.
+ */
+el.btnRec.addEventListener('click', () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: isRecording ? 'stop_rec' : 'start_rec' }));
+});
+
+/*
+ * #btn-mark click: insert a marker into the active CSV recording.
+ * The button flashes "★ MARKED" optimistically (before the server responds)
+ * because marker insertion is side-effect-free and always succeeds when a
+ * recording is active.  The server also broadcasts a 'marker' event back so
+ * any other open dashboards also see the flash.
+ */
+el.btnMark.addEventListener('click', () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'marker' }));
+    const orig = el.btnMark.textContent;
+    el.btnMark.textContent = '★ MARKED';
+    setTimeout(() => { el.btnMark.textContent = orig; }, 600);
+});
+
+/*
+ * #chk-autosave change: send the new autoSave preference to the server.
+ * The server persists the value to server/config.json so it survives restarts.
+ * updateSaveBadge() is called immediately to update the header badge without
+ * waiting for the server to echo back a 'config' message.
+ */
+el.chkSave.addEventListener('change', () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'set_config', autoSave: el.chkSave.checked }));
+    updateSaveBadge();
+});
+
+/*
+ * updateRecUI()
+ * Reflects the current isRecording / recFile / recCount state in:
+ *   - #btn-rec   text and CSS class (recording class flips it red)
+ *   - #badge-rec text and CSS class
+ *   - #rec-info  status text (filename + sample count while recording;
+ *                last recording info when stopped)
+ */
+function updateRecUI() {
+    if (isRecording) {
+        el.btnRec.textContent   = '■ STOP RECORDING';
+        el.btnRec.className     = 'recording';
+        el.btnRec.disabled      = false;
+        el.badgeRec.textContent = '● RECORDING';
+        el.badgeRec.className   = 'badge rec';
+        el.recInfo.textContent  = `File: ${recFile}\nSamples: ${recCount.toLocaleString()}`;
+    } else {
+        const canStart          = phoneCount > 0;
+        el.btnRec.textContent   = '▶ START RECORDING';
+        el.btnRec.className     = '';
+        el.btnRec.disabled      = !canStart;
+        el.btnRec.title         = canStart ? '' : 'Connect a phone first';
+        el.badgeRec.textContent = 'NOT RECORDING';
+        el.badgeRec.className   = 'badge';
+        el.recInfo.textContent  = recFile
+            ? `Last: ${recFile}\n${recCount.toLocaleString()} samples saved.`
+            : canStart ? 'Ready to record.' : 'No phone connected.';
+    }
+}
+
+/*
+ * updateSaveBadge()
+ * Updates the AUTO-SAVE header badge text and CSS class to match the current
+ * state of the auto-save checkbox.
+ */
+function updateSaveBadge() {
+    const on = el.chkSave.checked;
+    el.badgeSave.textContent = `AUTO-SAVE: ${on ? 'ON' : 'OFF'}`;
+    el.badgeSave.className   = 'badge ' + (on ? 'ok' : '');
+}
+
+/* ── Recordings list ──────────────────────────────────────────────────────── */
+/*
+ * loadRecordings()
+ * Fetches the list of saved CSV recordings from GET /api/recordings and
+ * renders them into the #list-panel.  Called at boot and after every 'rec'
+ * message (a new file may have been completed).
+ * The empty try/catch silently ignores network errors (e.g. server not ready).
+ */
+async function loadRecordings() {
+    try {
+        const data = await fetch('/api/recordings').then(r => r.json());
+        renderList(data);
+    } catch {}
+}
+
+/*
+ * renderList(list)
+ * Renders an array of recording metadata objects into #rec-list.
+ * Each object has: { name, date (ISO string), bytes, samples }.
+ *
+ * The filename displayed strips the "recording_" prefix, ".csv" extension,
+ * and replaces dashes with spaces to produce a readable short label.
+ * The full filename is kept in the title attribute for a tooltip on hover.
+ *
+ * File size is shown as KB below 1 MB, MB above.
+ */
+function renderList(list) {
+    el.recList.innerHTML = '';
+    el.emptyMsg.style.display = list.length ? 'none' : 'block';
+
+    for (const rec of list) {
+        const date = new Date(rec.date).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' });
+        const size = rec.bytes < 1048576
+            ? `${(rec.bytes / 1024).toFixed(1)} KB`
+            : `${(rec.bytes / 1048576).toFixed(1)} MB`;
+
+        const item = document.createElement('div');
+        item.className = 'rec-item';
+        /* data-dl and data-del attributes are read by the delegated click
+           handler on #rec-list to identify the target filename. */
+        item.innerHTML = `
+            <div class="rec-name" title="${rec.name}">
+                ${rec.name.replace('recording_', '').replace('.csv', '').replace(/-/g, ' ')}
+            </div>
+            <div class="rec-meta">${rec.samples.toLocaleString()} · ${size}</div>
+            <div class="rec-actions">
+                <button class="icon-btn"     data-dl="${rec.name}"  title="Download">↓</button>
+                <button class="icon-btn del" data-del="${rec.name}" title="${isRecording && rec.name === recFile ? 'Cannot delete an active recording' : 'Delete'}"
+                    ${isRecording && rec.name === recFile ? 'disabled' : ''}>✕</button>
+            </div>
+        `;
+        el.recList.appendChild(item);
+    }
+}
+
+/*
+ * Delegated click handler on #rec-list — handles both download and delete
+ * buttons for all recording rows without adding per-row event listeners.
+ *
+ * Download: creates a temporary <a> with the API download URL and triggers
+ *   a click on it.  The Content-Disposition: attachment header on the server
+ *   response causes the browser to save the file rather than navigate to it.
+ *
+ * Delete: asks the user to confirm, then sends DELETE /api/recordings/<name>.
+ *   loadRecordings() is called after deletion to refresh the list.
+ */
+el.recList.addEventListener('click', async (e) => {
+    const dl  = e.target.dataset.dl;
+    const del = e.target.dataset.del;
+
+    if (dl) {
+        const a = document.createElement('a');
+        a.href     = `/api/recordings/${encodeURIComponent(dl)}/download`;
+        a.download = dl;
+        a.click();
+    }
+
+    if (del) {
+        const confirmed = await showModal(del);
+        if (confirmed) {
+            await fetch(`/api/recordings/${encodeURIComponent(del)}`, { method: 'DELETE' });
+            await loadRecordings();
+        }
+    }
+});
+
+/* ── Loading overlay ──────────────────────────────────────────────────────── */
+function hideLoader() {
+    if (loaderHidden) return;
+    loaderHidden = true;
+    const loader = document.getElementById('loader');
+    loader.classList.add('fade-out');
+    setTimeout(() => { loader.style.display = 'none'; }, 420);
+}
+
+/* ── Custom confirm modal ─────────────────────────────────────────────────── */
+function showModal(filename) {
+    return new Promise(resolve => {
+        const backdrop = document.getElementById('modal-backdrop');
+        const body     = document.getElementById('modal-body');
+        const btnOk    = document.getElementById('modal-confirm');
+        const btnCancel= document.getElementById('modal-cancel');
+
+        body.textContent = `Delete "${filename}"? This cannot be undone.`;
+        backdrop.classList.add('open');
+
+        function close(result) {
+            backdrop.classList.remove('open');
+            btnOk.removeEventListener('click', onOk);
+            btnCancel.removeEventListener('click', onCancel);
+            resolve(result);
+        }
+        function onOk()     { close(true);  }
+        function onCancel() { close(false); }
+
+        btnOk.addEventListener('click', onOk);
+        btnCancel.addEventListener('click', onCancel);
+        backdrop.addEventListener('click', e => { if (e.target === backdrop) close(false); }, { once: true });
+    });
+}
+
+/* ── Canvas chart ─────────────────────────────────────────────────────────── */
+/*
+ * setupCanvas()
+ * Reads the current size of #chart-area and resizes the <canvas> to match,
+ * scaled by devicePixelRatio for crisp rendering on high-DPI (retina) screens.
+ * The CSS width/height are kept at the CSS-pixel size; the canvas buffer is
+ * larger (multiplied by dpr).  ctx.scale(dpr, dpr) compensates so all drawing
+ * coordinates remain in CSS pixels throughout the rest of the draw code.
+ *
+ * Returns { ctx, w, h } where w/h are CSS pixel dimensions, or null if the
+ * container has zero size (e.g. before layout is complete).
+ *
+ * Note: this is called at the start of every drawChart() call because the
+ * window may have been resized since the last frame.  Resizing a canvas clears
+ * it, which is intentional — we redraw from scratch each frame anyway.
+ */
+function setupCanvas() {
+    const w = el.chartArea.clientWidth;
+    const h = el.chartArea.clientHeight;
+    if (!w || !h) return null;
+    const dpr = window.devicePixelRatio || 1;
+    el.canvas.width        = w * dpr;
+    el.canvas.height       = h * dpr;
+    el.canvas.style.width  = w + 'px';
+    el.canvas.style.height = h + 'px';
+    const ctx = el.canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    return { ctx, w, h };
+}
+
+/*
+ * drawChart()
+ * Renders the current contents of the rolling data buffers onto the canvas.
+ * Called every animation frame by loop().
+ *
+ * Layout:
+ *   pad.l = 44 px left padding for Y-axis labels
+ *   pad.r/t/b = 8 px margins
+ *   cw × ch = drawable chart area
+ *
+ * Auto-scaling Y axis:
+ *   The Y range is derived from the min/max of all currently visible data across
+ *   all four axes combined.  An 8% padding is added above and below the extremes
+ *   so lines never touch the very top or bottom edge.
+ *   When the span is 0 (all values identical), a minimum span of 1 is used to
+ *   avoid division-by-zero in the toY() mapping.
+ *
+ * Grid:
+ *   6 horizontal dashed grid lines with labels on the left.
+ *   A solid zero line is drawn only when the Y range crosses zero, making the
+ *   baseline obvious for bipolar signals.
+ *
+ * Traces:
+ *   Each trace is drawn with trace(), which fills the area below the line as
+ *   well as stroking the line itself.  Axes are drawn back-to-front (mag first,
+ *   then z, y, x) so X is always on top and most readable.
+ *   Axes where visible[axis] is false are skipped entirely.
+ *
+ * The `off` variable in trace() handles the case where the buffer has fewer
+ * than MAX_PTS samples (during the initial fill phase): the first point is
+ * placed at the x coordinate corresponding to its future position in a full
+ * buffer, so traces grow from the right and scroll left once the buffer is full.
+ */
+function drawChart() {
+    const d = setupCanvas();
+    if (!d) return;
+    const { ctx, w, h } = d;
+    ctx.clearRect(0, 0, w, h);
+
+    const pad = { l: 44, r: 8, t: 8, b: 8 };
+    const cw  = w - pad.l - pad.r;
+    const ch  = h - pad.t - pad.b;
+
+    /* Show a placeholder message until the first data arrives */
+    if (buf.mag.length < 2) {
+        ctx.fillStyle = C.label;
+        ctx.font      = '12px Consolas, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('No data — connect the phone to start streaming', w / 2, h / 2);
+        return;
+    }
+
+    /* Compute Y-axis range from all data in the buffer (all four axes pooled) */
+    const all  = [...buf.x, ...buf.y, ...buf.z, ...buf.mag];
+    let yMin   = Math.min(...all);
+    let yMax   = Math.max(...all);
+    const span = yMax - yMin || 1; /* guard against zero span */
+    yMin -= span * 0.08;           /* 8% padding below the minimum */
+    yMax += span * 0.08;           /* 8% padding above the maximum */
+
+    /* Map a buffer index to a canvas X coordinate */
+    const toX = i => pad.l + (i / (MAX_PTS - 1)) * cw;
+    /* Map a sensor value to a canvas Y coordinate (inverted: higher value = lower Y) */
+    const toY = v => pad.t + ((yMax - v) / (yMax - yMin)) * ch;
+
+    /* Draw 6 horizontal dashed grid lines with Y-axis value labels */
+    ctx.strokeStyle = C.grid; ctx.lineWidth = 1; ctx.setLineDash([2, 4]);
+    ctx.font = '9px Consolas, monospace'; ctx.fillStyle = C.label; ctx.textAlign = 'right';
+
+    for (let i = 0; i <= 5; i++) {
+        const y = pad.t + (i / 5) * ch;
+        const v = yMax - (i / 5) * (yMax - yMin);
+        ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+        ctx.fillText(v.toFixed(0), pad.l - 4, y + 3);
+    }
+    ctx.setLineDash([]); /* reset dash pattern before drawing traces */
+
+    /* Draw a solid zero baseline only when the Y range straddles zero */
+    if (yMin < 0 && yMax > 0) {
+        const zy = toY(0);
+        ctx.strokeStyle = C.zero; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(pad.l, zy); ctx.lineTo(w - pad.r, zy); ctx.stroke();
+    }
+
+    /*
+     * trace(arr, col)
+     * Draws a filled line chart for a single axis buffer.
+     *
+     * `off` accounts for a partially filled buffer: during the first MAX_PTS
+     * samples, the buffer is shorter than MAX_PTS.  off = MAX_PTS - arr.length
+     * maps the first buffered sample to the x-coordinate where it would sit in
+     * a full buffer, so the trace grows from the right edge and scrolls left.
+     *
+     * The fill is created by continuing the path to the bottom-right corner, then
+     * to the bottom-left corner of the trace, then closePath(), so fill() shades
+     * the area between the line and the bottom of the chart.
+     */
+    function trace(arr, col) {
+        if (arr.length < 2) return;
+        const off = MAX_PTS - arr.length;
+        ctx.beginPath(); ctx.moveTo(toX(off), toY(arr[0]));
+        for (let i = 1; i < arr.length; i++) ctx.lineTo(toX(off + i), toY(arr[i]));
+        ctx.strokeStyle = col.stroke; ctx.lineWidth = 1.5; ctx.stroke();
+        /* Close the fill area back to the chart bottom */
+        ctx.lineTo(toX(off + arr.length - 1), pad.t + ch);
+        ctx.lineTo(toX(off), pad.t + ch);
+        ctx.closePath(); ctx.fillStyle = col.fill; ctx.fill();
+    }
+
+    /* Draw in back-to-front order so X axis is always on top */
+    if (visible.mag) trace(buf.mag, C.mag);
+    if (visible.z)   trace(buf.z,   C.z);
+    if (visible.y)   trace(buf.y,   C.y);
+    if (visible.x)   trace(buf.x,   C.x);
+}
+
+/*
+ * updateReadouts()
+ * Writes the current `cur` values to the numeric readout spans and updates
+ * the magnitude bars.  The bar width is clamped to 0–100% and is proportional
+ * to |value| / 100 μT — i.e. ±100 μT maps to full-width.
+ * Called every animation frame by loop().
+ */
+function updateReadouts() {
+    el.vx.textContent = cur.x.toFixed(2);
+    el.vy.textContent = cur.y.toFixed(2);
+    el.vz.textContent = cur.z.toFixed(2);
+    el.vm.textContent = cur.mag.toFixed(2);
+    const S = 100; /* full-scale value for bar display (μT) */
+    el.bx.style.width = Math.min(Math.abs(cur.x) / S * 100, 100) + '%';
+    el.by.style.width = Math.min(Math.abs(cur.y) / S * 100, 100) + '%';
+    el.bz.style.width = Math.min(Math.abs(cur.z) / S * 100, 100) + '%';
+}
+
+/*
+ * updateStatusBar()
+ * Updates the three status bar items and the settings panel info fields.
+ * #sb-time  — current wall-clock HH:MM:SS (first 8 chars of toTimeString()).
+ * #sb-samples — total samples received since page load.
+ * cfg-samples — same count in the settings panel.
+ * cfg-ws — "Connected" or "Reconnecting…" based on WS readyState.
+ * Called every animation frame by loop().
+ */
+function updateStatusBar() {
+    const timeStr = new Date().toTimeString().slice(0, 8);
+    const sampleStr = `${totalReceived.toLocaleString()} samples`;
+    el.sbTime.textContent    = timeStr;
+    el.sbSamples.textContent = sampleStr;
+    const cfgSamples = $('cfg-samples');
+    if (cfgSamples) cfgSamples.textContent = totalReceived.toLocaleString();
+    const cfgWs = $('cfg-ws');
+    if (cfgWs) cfgWs.textContent = (ws && ws.readyState === WebSocket.OPEN) ? 'Connected' : 'Reconnecting…';
+}
+
+/* ── View switching ───────────────────────────────────────────────────────── */
+/*
+ * switchView(view)
+ * Shows/hides the right-column panels based on the selected view name.
+ *
+ * HOW IT WORKS:
+ *   Each .right-panel element carries a data-for-view attribute containing a
+ *   space-separated list of view names in which that panel should be visible.
+ *   For example:
+ *     data-for-view="live"             → visible only when view === 'live'
+ *     data-for-view="live recordings"  → visible in both 'live' and 'recordings'
+ *     data-for-view="settings"         → visible only when view === 'settings'
+ *
+ *   switchView() splits each panel's attribute on spaces, checks whether the
+ *   requested view name appears in the resulting array, and sets display:flex
+ *   or display:none accordingly.
+ *
+ * WHY data-for-view?
+ *   Using a data attribute rather than CSS classes keeps the view membership
+ *   information in the HTML alongside the panel markup, so it is easy to audit
+ *   which panels belong to which views without reading JS code.  It also avoids
+ *   a proliferation of view-specific CSS classes.
+ *
+ * Special case: in the "recordings" view the #list-panel should fill all
+ * available height (flex:1) since it is the only visible panel.  In other views
+ * it shares space with the recording controls panel, so flex is reset to ''.
+ */
+function switchView(view) {
+    document.querySelectorAll('.right-panel').forEach(panel => {
+        const views = (panel.dataset.forView || '').split(' ');
+        const visible = views.includes(view);
+        panel.style.display = visible ? 'flex' : 'none';
+        if (visible) panel.style.flexDirection = 'column';
+    });
+    /* In "recordings" view, expand list-panel to fill the full right column */
+    const listPanel = $('list-panel');
+    if (listPanel) listPanel.style.flex = (view === 'recordings') ? '1' : '';
+}
+
+/*
+ * loop()
+ * The main animation loop, driven by requestAnimationFrame.
+ * Updates all live-data DOM elements and redraws the canvas chart each frame.
+ * requestAnimationFrame throttles to the display refresh rate (typically 60 fps)
+ * and pauses automatically when the tab is not visible, saving CPU.
+ */
+function loop() {
+    updateReadouts();
+    updateStats();
+    updateStatusBar();
+    drawChart();
+    requestAnimationFrame(loop);
+}
+
+/* ── Boot ─────────────────────────────────────────────────────────────────── */
+/*
+ * Wire up all interactive elements and start the application.
+ * Order matters: applyVisibility() must run before loop() so the initial
+ * DOM state matches the persisted visibility preferences.
+ */
+
+/* Axis toggle handlers — every [data-toggle] element (p-labels + legend items) */
+document.querySelectorAll('[data-toggle]').forEach(node => {
+    node.addEventListener('click', () => toggleAxis(node.dataset.toggle));
+});
+
+/*
+ * Activity bar view switching:
+ * Each .act-icon[data-view] click:
+ *   1. Removes .active from all activity icons.
+ *   2. Adds .active to the clicked icon (blue left border + bright text).
+ *   3. Calls switchView(icon.dataset.view) to show/hide the right panels.
+ */
+document.querySelectorAll('.act-icon[data-view]').forEach(icon => {
+    icon.addEventListener('click', () => {
+        document.querySelectorAll('.act-icon').forEach(i => i.classList.remove('active'));
+        icon.classList.add('active');
+        switchView(icon.dataset.view);
+    });
+});
+
+/* Apply stored axis visibility preferences to the DOM */
+applyVisibility();
+/* Connect to the WebSocket endpoint — may reconnect indefinitely */
+connect();
+/* Fetch and render the saved recordings list */
+loadRecordings();
+/* Start the animation loop */
+loop();
+
+})();
+</script>
+</body>
+</html>

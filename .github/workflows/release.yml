@@ -1,0 +1,154 @@
+# release.yml — Build & publish Mobile Magnetometer release artifacts.
+#
+# Trigger: push a version tag (e.g. v1.0.0).
+#   git tag v1.0.0
+#   git push origin v1.0.0
+#
+# The workflow runs two parallel build jobs, then creates a GitHub Release
+# with both artifacts attached and SHA-256 checksums in the release body.
+#
+# Artifact file names are fixed (no version suffix) so the download page
+# at docs/index.html can always link to the latest release by filename:
+#   https://github.com/USER/REPO/releases/latest/download/Mobile-Magnetometer-Setup.exe
+#   https://github.com/USER/REPO/releases/latest/download/Mobile-Magnetometer.apk
+
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'   # e.g. v1.0.0, v1.2.3
+
+permissions:
+  contents: write   # needed to create and upload to GitHub Releases
+
+jobs:
+
+  # ── Windows installer (Electron + NSIS) ──────────────────────────────────
+  build-windows:
+    name: Build Windows installer
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Electron installer
+        run: npm run build -- --publish never
+        # Outputs dist-app/Mobile-Magnetometer-Setup.exe (artifactName in package.json)
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist-app/Mobile-Magnetometer-Setup.exe
+          if-no-files-found: error
+
+  # ── Android APK (Capacitor + Gradle) ─────────────────────────────────────
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Sync Capacitor web assets into the Android project
+        # Copies mobile/ → android/app/src/main/assets/public/
+        run: npx cap sync android
+
+      - name: Point Gradle at the pre-installed Android SDK
+        # The Ubuntu runner ships with the Android SDK at $ANDROID_SDK_ROOT.
+        # local.properties is in .gitignore (machine-specific), so we create
+        # it here for the CI environment.
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+        # Output: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Rename APK to final download name
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk Mobile-Magnetometer.apk
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: Mobile-Magnetometer.apk
+          if-no-files-found: error
+
+  # ── GitHub Release ────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: [build-windows, build-android]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+
+      - name: Download Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+
+      - name: Compute SHA-256 checksums
+        id: checksums
+        run: |
+          EXE_HASH=$(sha256sum Mobile-Magnetometer-Setup.exe | awk '{print $1}')
+          APK_HASH=$(sha256sum Mobile-Magnetometer.apk     | awk '{print $1}')
+          echo "exe=$EXE_HASH" >> $GITHUB_OUTPUT
+          echo "apk=$APK_HASH" >> $GITHUB_OUTPUT
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Mobile-Magnetometer-Setup.exe
+            Mobile-Magnetometer.apk
+          generate_release_notes: true
+          body: |
+            ## Downloads
+
+            | File | Platform | SHA-256 |
+            |------|----------|---------|
+            | `Mobile-Magnetometer-Setup.exe` | Windows 10/11 (x64) | `${{ steps.checksums.outputs.exe }}` |
+            | `Mobile-Magnetometer.apk` | Android 5.1+ (API 22+) | `${{ steps.checksums.outputs.apk }}` |
+
+            **Install:**
+            - **Windows** — run `Mobile-Magnetometer-Setup.exe`, complete the wizard, launch from the Start Menu.
+            - **Android** — transfer `Mobile-Magnetometer.apk` to the phone, enable *Install unknown apps* in Settings, open the file to install.
+
+            **Verify integrity (optional):**
+            ```powershell
+            # Windows
+            Get-FileHash .\Mobile-Magnetometer-Setup.exe -Algorithm SHA256 | Select Hash
+            ```
+            ```bash
+            # Linux / macOS
+            sha256sum Mobile-Magnetometer.apk
+            ```

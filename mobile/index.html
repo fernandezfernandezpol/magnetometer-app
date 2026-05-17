@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <!-- viewport-fit=cover exposes safe-area-inset-* env vars for notch/home-bar padding -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="description" content="Mobile Magnetometer — Real-time magnetometer telemetry">
+    <meta name="theme-color" content="#1e1e1e">
+    <!-- iOS PWA meta tags (display:standalone, status bar style) -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Mobile Magnetometer">
+    <title>Mobile Magnetometer — Magnetic Field Telemetry</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" type="image/png" href="compass.png">
+    <link rel="stylesheet" href="styles.css?v=16">
+</head>
+<body>
+
+    <!-- iOS 13+ permission overlay.
+         DeviceOrientationEvent.requestPermission() must be called from a user
+         gesture — calling it on page load is silently denied. This overlay
+         ensures the request fires from a tap. Hidden by default; app.js shows
+         it only when running on iOS. -->
+    <div id="start-overlay">
+        <div class="overlay-logo">MOBILE MAGNETOMETER</div>
+        <div class="overlay-subtitle">TELEMETRY SYSTEM</div>
+        <div class="overlay-info">Motion sensor access is required to read magnetic field data.</div>
+        <button id="btn-start-sensor">TAP TO START</button>
+    </div>
+
+    <!-- PC server connection modal.
+         Shown when the user taps the PC button in the header.
+         The entered IP is persisted in localStorage for auto-reconnect. -->
+    <div id="connect-modal">
+        <div class="modal-box">
+            <div class="modal-title">CONNECT TO PC SERVER</div>
+            <div class="modal-info">
+                Enter the PC's local IP address (same Wi-Fi network).<br>
+                <small>e.g. 192.168.1.100</small>
+            </div>
+            <input id="server-ip" type="text" inputmode="url"
+                   placeholder="192.168.1.100" autocomplete="off" spellcheck="false">
+            <div class="modal-hint">
+                Verify the server is running: <a id="link-trust" href="#" target="_blank">open dashboard</a>
+            </div>
+            <div class="modal-btns">
+                <button id="btn-modal-connect" class="hardware-btn">CONNECT</button>
+                <button id="btn-modal-cancel"  class="hardware-btn btn-cancel">CANCEL</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Decorative telemetry grid background -->
+    <div id="telemetry-grid-bg"></div>
+
+    <div id="app">
+
+        <header id="sys-header">
+            <div class="header-block">
+                <span class="sys-title">MOBILE MAGNETOMETER</span>
+            </div>
+            <div class="header-block status-block">
+                <div class="status-indicator-ring">
+                    <div id="status-indicator" class="indicator-dot"></div>
+                </div>
+                <span id="sensor-mode" class="status-text">INIT</span>
+            </div>
+            <div class="header-block">
+                <span class="label">Hz:</span>
+                <span id="sample-rate" class="value highlight">--</span>
+            </div>
+            <!-- PC link status: OFFLINE / connecting / LINKED + REC indicator -->
+            <div class="header-block pc-block" id="pc-block">
+                <button id="btn-pc-connect" class="pc-btn" title="Connect to PC server">PC</button>
+                <span id="pc-status" class="pc-status offline">OFFLINE</span>
+                <span id="rec-dot" class="rec-dot hidden">● REC</span>
+            </div>
+            <div class="header-block info-block">
+                <span id="info-text" class="value">Initializing...</span>
+            </div>
+        </header>
+
+        <main id="dashboard">
+
+            <!-- Per-axis readout panels. The axis-badge acts as a toggle button. -->
+            <div id="readouts-container">
+                <div class="panel readout-panel" id="panel-x">
+                    <div class="panel-header">
+                        <span class="axis-badge x-axis" data-toggle="x" role="button" title="Toggle X axis">AXIS-X</span>
+                    </div>
+                    <div class="display-value-wrapper">
+                        <span id="val-x" class="display-value x-color">0.00</span>
+                        <span class="unit">μT</span>
+                    </div>
+                    <div class="progress-track"><div id="bar-x" class="progress-fill x-bg"></div></div>
+                    <div class="stats-row">
+                        <div class="stat-cell"><span class="stat-lbl">MIN</span><span class="stat-val" id="stat-x-min">—</span></div>
+                        <div class="stat-cell"><span class="stat-lbl">MAX</span><span class="stat-val" id="stat-x-max">—</span></div>
+                        <div class="stat-cell"><span class="stat-lbl">μ</span><span class="stat-val" id="stat-x-mean">—</span></div>
+                        <div class="stat-cell"><span class="stat-lbl">σ</span><span class="stat-val" id="stat-x-sd">—</span></div>
+                    </div>
+                </div>
+                <div class="panel readout-panel" id="panel-y">
+                    <div class="panel-header">
+                        <span class="axis-badge y-axis" data-toggle="y" role="button" title="Toggle Y axis">AXIS-Y</span>
+                    </div>
+                    <div class="display-value-wrapper">
+                        <span id="val-y" class="display-value y-color">0.00</span>
+                        <span class="unit">μT</span>
+                    </div>
+                    <div class="progress-track"><div id="bar-y" class="progress-fill y-bg"></div></div>
+                    <div class="stats-row">
+                        <div class="stat-cell"><span class="stat-lbl">MIN</span><span class="stat-val" id="stat-y-min">—</span></div>
+                        <div class="stat-cell"><span class="stat-lbl">MAX</span><span class="stat-val" id="stat-y-max">—</span></div>
+                        <div class="stat-cell"><span class="stat-lbl">μ</span><span class="stat-val" id="stat-y-mean">—</span></div>
+                        <div class="stat-cell"><span class="stat-lbl">σ</span><span class="stat-val" id="stat-y-sd">—</span></div>
+                    </div>
+                </div>
+                <div class="panel readout-panel" id="panel-z">
+                    <div class="panel-header">
+                        <span class="axis-badge z-axis" data-toggle="z" role="button" title="Toggle Z axis">AXIS-Z</span>
+                    </div>
+                    <div class="display-value-wrapper">
+                        <span id="val-z" class="display-value z-color">0.00</span>
+                        <span class="unit">μT</span>
+                    </div>
+                    <div class="progress-track"><div id="bar-z" class="progress-fill z-bg"></div></div>
+                    <div class="stats-row">
+                        <div class="stat-cell"><span class="stat-lbl">MIN</span><span class="stat-val" id="stat-z-min">—</span></div>
+                        <div class="stat-cell"><span class="stat-lbl">MAX</span><span class="stat-val" id="stat-z-max">—</span></div>
+                        <div class="stat-cell"><span class="stat-lbl">μ</span><span class="stat-val" id="stat-z-mean">—</span></div>
+                        <div class="stat-cell"><span class="stat-lbl">σ</span><span class="stat-val" id="stat-z-sd">—</span></div>
+                    </div>
+                </div>
+                <div class="panel readout-panel total-panel" id="panel-mag">
+                    <div class="panel-header">
+                        <span class="axis-badge total-axis" data-toggle="mag" role="button" title="Toggle |B| axis">TOTAL MAGNITUDE |B|</span>
+                    </div>
+                    <div class="display-value-wrapper">
+                        <span id="val-total" class="display-value total-color large-display">0.00</span>
+                        <span class="unit">μT</span>
+                    </div>
+                    <div class="stats-row">
+                        <div class="stat-cell"><span class="stat-lbl">MIN</span><span class="stat-val" id="stat-m-min">—</span></div>
+                        <div class="stat-cell"><span class="stat-lbl">MAX</span><span class="stat-val" id="stat-m-max">—</span></div>
+                        <div class="stat-cell"><span class="stat-lbl">μ</span><span class="stat-val" id="stat-m-mean">—</span></div>
+                        <div class="stat-cell"><span class="stat-lbl">σ</span><span class="stat-val" id="stat-m-sd">—</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Controls strip: sample rate, calibration zero, pause, record/export, marker -->
+            <div id="controls-strip">
+                <div class="ctrl-group">
+                    <span class="ctrl-label">RATE</span>
+                    <button class="hz-btn" data-hz="1">1Hz</button>
+                    <button class="hz-btn" data-hz="5">5Hz</button>
+                    <button class="hz-btn" data-hz="20">20Hz</button>
+                </div>
+                <button id="btn-zero"  class="ctrl-btn">ZERO</button>
+                <button id="btn-pause" class="ctrl-btn">⏸ PAUSE</button>
+                <button id="btn-rec"   class="ctrl-btn">↓ EXPORT</button>
+                <button id="btn-mark"  class="ctrl-btn">◆ MARK</button>
+            </div>
+
+            <!-- Real-time chart. Legend items also act as toggle buttons. -->
+            <div id="chart-container" class="panel">
+                <div class="chart-header">
+                    <div class="chart-title">REAL-TIME TRACE</div>
+                    <div class="chart-legend">
+                        <div class="legend-item" data-toggle="x"   role="button" title="Toggle X"><span class="swatch x-bg"></span>X</div>
+                        <div class="legend-item" data-toggle="y"   role="button" title="Toggle Y"><span class="swatch y-bg"></span>Y</div>
+                        <div class="legend-item" data-toggle="z"   role="button" title="Toggle Z"><span class="swatch z-bg"></span>Z</div>
+                        <div class="legend-item" data-toggle="mag" role="button" title="Toggle |B|"><span class="swatch total-bg"></span>|B|</div>
+                    </div>
+                    <button id="btn-clear" class="hardware-btn">PURGE DATA</button>
+                </div>
+                <div id="chart-wrap">
+                    <canvas id="chart"></canvas>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <script src="app.js?v=16"></script>
+</body>
+</html>

@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Download Mobile Magnetometer — real-time magnetometer telemetry app for Android and Windows.">
+
+    <!-- Open Graph tags for social / link preview cards -->
+    <meta property="og:title"       content="Mobile Magnetometer — Download">
+    <meta property="og:description" content="Real-time magnetic field telemetry. Native Android APK + Windows desktop app.">
+    <meta property="og:type"        content="website">
+
+    <!--
+    ╔══════════════════════════════════════════════════════════════╗
+    ║  CONTENT SECURITY POLICY                                     ║
+    ╠══════════════════════════════════════════════════════════════╣
+    ║  default-src 'none'       Block every resource type unless   ║
+    ║                           explicitly permitted below.        ║
+    ║                                                              ║
+    ║  script-src 'unsafe-inline'  Allow the single inline <script>║
+    ║                           block that constructs GitHub       ║
+    ║                           release URLs from window.location. ║
+    ║                           Safe here because the page has no  ║
+    ║                           user input and therefore no XSS    ║
+    ║                           injection surface.                 ║
+    ║                                                              ║
+    ║  style-src 'unsafe-inline'  Allow the inline <style> block.  ║
+    ║                           No external stylesheets are loaded.║
+    ║                                                              ║
+    ║  img-src data:            Allow inline SVG logo rendered as  ║
+    ║                           a data URI by the browser engine.  ║
+    ║                                                              ║
+    ║  connect-src 'none'       Block all XHR / fetch / WebSocket  ║
+    ║                           requests. The page never phones    ║
+    ║                           home or contacts external APIs.    ║
+    ║                                                              ║
+    ║  form-action 'none'       No forms on this page; block any   ║
+    ║                           injected form submissions.         ║
+    ║                                                              ║
+    ║  base-uri 'none'          Prevent <base href> injection,     ║
+    ║                           which could redirect all relative  ║
+    ║                           URLs to an attacker-controlled     ║
+    ║                           origin.                            ║
+    ║                                                              ║
+    ║  object-src 'none'        Block <object>, <embed>, <applet>  ║
+    ║                           (legacy plugin vectors).           ║
+    ║                                                              ║
+    ║  NOTE: frame-ancestors (clickjacking protection) and         ║
+    ║  X-Frame-Options cannot be set via <meta> CSP — they         ║
+    ║  require an HTTP response header. GitHub Pages free tier     ║
+    ║  does not support custom response headers.                   ║
+    ╚══════════════════════════════════════════════════════════════╝
+    -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'none';
+                   script-src 'unsafe-inline';
+                   style-src 'unsafe-inline';
+                   img-src 'self' data:;
+                   connect-src 'none';
+                   form-action 'none';
+                   base-uri 'none';
+                   object-src 'none';">
+
+    <!--
+    Referrer policy: suppress the Referer header on all outbound
+    navigation so the page URL is not leaked to GitHub or any other
+    third-party destination the user clicks through to.
+    -->
+    <meta name="referrer" content="no-referrer">
+
+    <link rel="icon" type="image/png" href="compass.png">
+    <title>Mobile Magnetometer — Download</title>
+
+    <style>
+        /* ── Design tokens (same palette as the app) ─────────────────────
+           These CSS variables mirror the colour system used in
+           mobile/styles.css so the download page feels like an
+           extension of the app rather than a separate site.         */
+        :root {
+            --bg:          #1e1e1e;   /* page background                    */
+            --bg2:         #252526;   /* card / panel background            */
+            --bg3:         #2d2d2d;   /* table header / inset background    */
+            --border:      #3e3e42;   /* subtle dividers and card borders   */
+            --accent:      #007acc;   /* VS Code blue — primary CTA colour  */
+            --accent-dark: #005f99;   /* hover state for accent buttons     */
+            --text:        #cccccc;   /* body text                          */
+            --bright:      #d4d4d4;   /* headings and emphasis              */
+            --dim:         #858585;   /* labels, captions, secondary info   */
+            --warn:        #ce9178;   /* warning / attention (X-axis amber) */
+            --ok:          #4ec9b0;   /* success / positive (Y-axis teal)   */
+        }
+
+        /* ── Global reset ────────────────────────────────────────────── */
+        *, *::before, *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            /* Consolas matches the monospace terminal aesthetic of the app.
+               The font stack provides cross-platform fallbacks. */
+            font-family: Consolas, 'Courier New', ui-monospace, monospace;
+            font-size: 14px;
+            line-height: 1.65;
+            /* Prevent horizontal scroll on narrow viewports */
+            overflow-x: hidden;
+        }
+
+        /* ── Page wrapper ────────────────────────────────────────────── */
+        .page {
+            max-width: 880px;
+            margin: 0 auto;
+            padding: 0 24px 48px;
+        }
+
+        /* ── Header ──────────────────────────────────────────────────── */
+        header {
+            display: flex;
+            align-items: center;
+            gap: 22px;
+            padding: 44px 0 36px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        /* The logo is the same SVG used in the app, rendered inline.
+           aria-hidden hides it from screen readers (decorative only). */
+        .logo svg { display: block; }
+
+        .header-text h1 {
+            font-size: 30px;
+            font-weight: 700;
+            color: var(--bright);
+            letter-spacing: 0.06em;
+        }
+
+        .header-text p {
+            font-size: 13px;
+            color: var(--dim);
+            margin-top: 5px;
+        }
+
+        /* Version badge next to the title */
+        .version-badge {
+            display: inline-block;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            color: var(--accent);
+            border: 1px solid var(--accent);
+            border-radius: 3px;
+            padding: 1px 6px;
+            vertical-align: middle;
+            margin-left: 10px;
+            opacity: 0.8;
+        }
+
+        /* ── Section label ────────────────────────────────────────────── */
+        /* A labelled horizontal rule that separates content sections */
+        .section-label {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--dim);
+            margin: 44px 0 18px;
+            user-select: none;
+        }
+        .section-label::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: var(--border);
+        }
+
+        /* ── Download cards ───────────────────────────────────────────── */
+        .cards {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+        /* Single-column on narrow screens */
+        @media (max-width: 560px) {
+            .cards { grid-template-columns: 1fr; }
+        }
+
+        .card {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            /* Subtle left accent line matching VS Code's active tab indicator */
+            border-left: 3px solid var(--accent);
+        }
+
+        .card-platform {
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--dim);
+        }
+
+        .card-name {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--bright);
+        }
+
+        .card-meta {
+            font-size: 12px;
+            color: var(--dim);
+            flex: 1; /* push the button to the bottom of the card */
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .card-warning {
+            margin-top: 6px;
+            color: var(--warn);
+            font-size: 11px;
+        }
+
+        /* ── Download button ──────────────────────────────────────────── */
+        .dl-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            background: var(--accent);
+            color: #ffffff;
+            text-decoration: none;
+            padding: 10px 20px;
+            border-radius: 3px;
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            cursor: pointer;
+            border: none;
+            /* Smooth transition for hover feedback */
+            transition: background 0.15s ease, opacity 0.15s ease;
+            /* Prevent text selection on repeated clicks */
+            user-select: none;
+            -webkit-user-select: none;
+            /* Prevent iOS tap highlight */
+            -webkit-tap-highlight-color: transparent;
+        }
+        .dl-btn:hover  { background: var(--accent-dark); }
+        .dl-btn:active { opacity: 0.85; }
+        /* Keyboard focus ring — visible only when navigating by keyboard */
+        .dl-btn:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 3px;
+            background: var(--accent-dark);
+        }
+        /* Suppress the default focus ring for mouse users */
+        .dl-btn:focus:not(:focus-visible) { outline: none; }
+
+        /* Disabled state used when the page is not on GitHub Pages */
+        .dl-btn[data-disabled] {
+            background: var(--bg3);
+            color: var(--dim);
+            border: 1px solid var(--border);
+            cursor: not-allowed;
+            pointer-events: none;
+            font-size: 11px;
+            letter-spacing: 0.04em;
+        }
+
+        /* ── First-run steps ──────────────────────────────────────────── */
+        .steps {
+            counter-reset: step;
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .steps li {
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+            counter-increment: step;
+        }
+
+        /* Numbered circle */
+        .steps li::before {
+            content: counter(step);
+            flex-shrink: 0;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            border: 1px solid var(--border);
+            background: var(--bg3);
+            color: var(--accent);
+            font-size: 11px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-top: 1px;
+        }
+
+        .steps code {
+            background: var(--bg3);
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            padding: 1px 5px;
+            font-family: inherit;
+            font-size: 13px;
+            color: var(--bright);
+        }
+
+        /* ── Hash verification table ──────────────────────────────────── */
+        .hash-note {
+            font-size: 12px;
+            color: var(--dim);
+            margin-bottom: 14px;
+            line-height: 1.6;
+        }
+
+        .hash-table {
+            width: 100%;
+            border-collapse: collapse;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+            background: var(--bg2);
+        }
+
+        .hash-table th {
+            text-align: left;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--dim);
+            background: var(--bg3);
+            padding: 10px 16px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .hash-table td {
+            padding: 10px 16px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+
+        .hash-table tr:last-child td { border-bottom: none; }
+
+        /* File name column — compact and never wraps */
+        .hash-table td:first-child {
+            color: var(--bright);
+            white-space: nowrap;
+            width: 1%;
+            padding-right: 24px;
+        }
+
+        /* Hash value column — break-all so long hex strings don't overflow */
+        .hash-table td:last-child {
+            font-size: 12px;
+            color: var(--dim);
+            word-break: break-all;
+        }
+
+        .hash-placeholder { font-style: italic; opacity: 0.45; }
+
+        /* Shell commands for computing hashes */
+        .hash-cmds {
+            font-size: 11px;
+            color: var(--dim);
+            margin-top: 10px;
+            line-height: 2;
+        }
+
+        .hash-cmds code {
+            background: var(--bg3);
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            padding: 1px 6px;
+            font-family: inherit;
+            font-size: 11px;
+            color: var(--text);
+        }
+
+        /* ── Footer ───────────────────────────────────────────────────── */
+        footer {
+            margin-top: 56px;
+            padding: 22px 0;
+            border-top: 1px solid var(--border);
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px 18px;
+            font-size: 12px;
+            color: var(--dim);
+        }
+
+        footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        footer a:hover        { text-decoration: underline; }
+        footer a:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+            border-radius: 2px;
+        }
+
+        .sep { color: var(--border); }
+    </style>
+</head>
+<body>
+<div class="page">
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         HEADER — logo, app name, tagline
+         ═══════════════════════════════════════════════════════════════ -->
+    <header>
+        <div class="logo" aria-hidden="true">
+            <img src="compass.png" width="64" height="64"
+                 style="object-fit:contain;" alt="">
+        </div>
+
+        <div class="header-text">
+            <h1>MOBILE MAGNETOMETER<span class="version-badge" id="version-badge">v1.0.0</span></h1>
+            <p>Real-time magnetic field telemetry &nbsp;·&nbsp; Android + Windows</p>
+        </div>
+    </header>
+
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         DOWNLOAD SECTION
+         Two cards side-by-side (or stacked on narrow screens):
+         one for the Android APK, one for the Windows installer.
+         Download links are populated by the inline script at the
+         bottom of the page.
+         ═══════════════════════════════════════════════════════════════ -->
+    <p class="section-label">Download</p>
+
+    <div class="cards">
+
+        <!-- Android card -->
+        <div class="card">
+            <div class="card-platform">Android</div>
+            <div class="card-name">APK</div>
+            <div class="card-meta">
+                <span>Native app &nbsp;·&nbsp; Capacitor</span>
+                <span>Android 7.0 Nougat (API 24) or later</span>
+                <span>Raw µT readings via hardware magnetometer</span>
+                <p class="card-warning">
+                    ⚠&nbsp; You must enable <em>Install unknown apps</em>
+                    in Android Settings before installing a file from
+                    outside the Play Store.
+                </p>
+            </div>
+            <!--
+              rel="noopener noreferrer" on download links:
+                noopener   — the opened page cannot access window.opener,
+                             preventing a tab-hijacking attack.
+                noreferrer — suppresses the Referer header, so GitHub
+                             does not see the URL of this page.
+              The 'download' attribute hints to the browser to save the
+              file rather than attempting to navigate to it.
+            -->
+            <a id="apk-link" class="dl-btn" href="#"
+               download="Mobile-Magnetometer.apk"
+               rel="noopener noreferrer"
+               aria-label="Download Android APK">
+                ↓&nbsp;&nbsp;Download .apk
+            </a>
+        </div>
+
+        <!-- Windows card -->
+        <div class="card">
+            <div class="card-platform">Windows</div>
+            <div class="card-name">Installer</div>
+            <div class="card-meta">
+                <span>Electron desktop app</span>
+                <span>Windows 10 / 11 &nbsp;·&nbsp; x64</span>
+                <span>Includes the embedded server &mdash; no Node.js required</span>
+                <span style="margin-top:4px">Installs to Program Files, creates
+                    Start&nbsp;Menu and Desktop shortcuts</span>
+            </div>
+            <a id="exe-link" class="dl-btn" href="#"
+               download="Mobile-Magnetometer-Setup.exe"
+               rel="noopener noreferrer"
+               aria-label="Download Windows installer">
+                ↓&nbsp;&nbsp;Download .exe
+            </a>
+        </div>
+
+    </div>
+
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         FIRST RUN GUIDE
+         Numbered steps from install to first recording.
+         ═══════════════════════════════════════════════════════════════ -->
+    <p class="section-label">First Run</p>
+
+    <ol class="steps">
+        <li>
+            Run <code>Mobile-Magnetometer-Setup.exe</code> on the PC and complete the installer,
+            then launch <strong>Mobile Magnetometer</strong> from the Start Menu or Desktop.
+            The server starts automatically and shows the PC's local IP address.
+        </li>
+        <li>
+            Transfer <code>Mobile-Magnetometer.apk</code> to the Android phone (USB cable,
+            cloud drive, AirDrop equivalent, etc.) and tap it to install.
+            If prompted, allow installation from unknown sources for your
+            file manager app.
+        </li>
+        <li>
+            Open <strong>Mobile Magnetometer</strong> on the phone &rarr; tap the
+            <code>PC</code> button in the header &rarr; enter the PC's local
+            IP address (e.g. <code>192.168.1.45</code>). Both devices must be
+            on the same Wi-Fi network.
+        </li>
+        <li>
+            The status badge changes to <code>LINKED</code> and the magnetometer
+            starts streaming. Live values and the chart appear on both screens.
+            The IP is saved automatically for future sessions.
+        </li>
+        <li>
+            Click <strong>▶ REC</strong> in the PC dashboard to start a CSV
+            recording. Click <strong>■ STOP</strong> when done. Download the
+            file from the <em>Saved Recordings</em> panel on the right.
+        </li>
+    </ol>
+
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         DOWNLOAD INTEGRITY VERIFICATION
+         SHA-256 hashes let users confirm that the downloaded files
+         have not been tampered with in transit or at rest.
+         The page owner should fill these in after each release build.
+         ═══════════════════════════════════════════════════════════════ -->
+    <p class="section-label">Verify download integrity</p>
+
+    <p class="hash-note">
+        Verify the SHA-256 fingerprint of each file after downloading
+        to confirm it has not been modified or corrupted in transit.
+        Exact hashes for each release are listed in the
+        <a id="releases-hash-link" href="https://github.com" target="_blank"
+           rel="noopener noreferrer">release notes</a>.
+    </p>
+
+    <table class="hash-table" aria-label="File hash verification">
+        <thead>
+            <tr>
+                <th scope="col">File</th>
+                <th scope="col">SHA-256</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>Mobile-Magnetometer.apk</td>
+                <td class="hash-placeholder" id="hash-apk">see release notes</td>
+            </tr>
+            <tr>
+                <td>Mobile-Magnetometer-Setup.exe</td>
+                <td class="hash-placeholder" id="hash-exe">see release notes</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="hash-cmds">
+        Compute on <strong>Windows:</strong>
+        <code>Get-FileHash .\Mobile-Magnetometer-Setup.exe -Algorithm SHA256 | Select Hash</code>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+        <strong>macOS / Linux:</strong>
+        <code>sha256sum Mobile-Magnetometer.apk</code>
+    </div>
+
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         FOOTER
+         ═══════════════════════════════════════════════════════════════ -->
+    <footer>
+        <a id="gh-link" href="https://github.com" target="_blank"
+           rel="noopener noreferrer">View on GitHub</a>
+        <span class="sep">&middot;</span>
+        <a id="releases-link" href="https://github.com" target="_blank"
+           rel="noopener noreferrer">All releases</a>
+        <span class="sep">&middot;</span>
+        <span>MIT License</span>
+        <span class="sep">&middot;</span>
+        <span>© 2026 Pol Fernández Fernández</span>
+    </footer>
+
+</div><!-- /.page -->
+
+<script>
+/*
+ * Download URL builder
+ * ────────────────────
+ * When hosted on GitHub Pages the URL follows the pattern:
+ *
+ *   https://USERNAME.github.io/REPO-NAME/
+ *
+ * GitHub Releases provides a permanent redirect for the latest
+ * release asset under a given filename:
+ *
+ *   https://github.com/USERNAME/REPO/releases/latest/download/FILENAME
+ *
+ * This script reads window.location (same-origin, read-only) to
+ * extract USERNAME and REPO, then writes the correct href values
+ * to the download buttons. No external requests are made.
+ *
+ * If the page is not on GitHub Pages (e.g. local file:// preview)
+ * the buttons are visually disabled with an explanatory label.
+ *
+ * Security properties of this script:
+ *   • Reads only window.location — no user input is processed.
+ *   • Writes only to .href and .textContent — no innerHTML, no eval.
+ *   • No network requests (connect-src 'none' in CSP enforces this).
+ *   • Wrapped in an IIFE to avoid polluting the global scope.
+ */
+(function () {
+    'use strict';
+
+    /* ── Detect GitHub Pages hosting ──────────────────────────────── */
+
+    var hostname = window.location.hostname;
+
+    // GitHub Pages project sites always match USERNAME.github.io
+    var ghMatch = hostname.match(/^([a-z0-9_-]+)\.github\.io$/i);
+
+    if (!ghMatch) {
+        // Not on GitHub Pages — disable buttons so they don't mislead
+        // the developer doing a local file:// preview.
+        ['apk-link', 'exe-link'].forEach(function (id) {
+            var btn = document.getElementById(id);
+            btn.setAttribute('data-disabled', '');
+            btn.removeAttribute('href');
+            btn.textContent = 'Available on GitHub Pages';
+        });
+        return; // nothing more to do
+    }
+
+    /* ── Build the base GitHub URLs ───────────────────────────────── */
+
+    var user = ghMatch[1];
+
+    // Extract the repo name from the first path segment.
+    // pathname for a project page is '/repo-name/' or '/repo-name/index.html'.
+    var pathSegments = window.location.pathname
+                           .replace(/^\//, '')   // strip leading slash
+                           .split('/');
+    var repo = pathSegments[0];
+
+    if (!repo) {
+        // User / org root page (username.github.io with no sub-path):
+        // cannot infer repo name, leave buttons as-is.
+        return;
+    }
+
+    var repoBase = 'https://github.com/' + user + '/' + repo;
+    var dlBase   = repoBase + '/releases/latest/download/';
+
+    /* ── Populate download button hrefs ───────────────────────────── */
+
+    // The filenames below must match the names used when uploading
+    // assets to the GitHub Release:
+    //   • Mobile-Magnetometer.apk          — rename the debug/release APK before upload
+    //   • Mobile-Magnetometer-Setup.exe    — electron-builder artifact (set via artifactName)
+    document.getElementById('apk-link').href = dlBase + 'Mobile-Magnetometer.apk';
+    document.getElementById('exe-link').href = dlBase + 'Mobile-Magnetometer-Setup.exe';
+
+    /* ── Populate footer links ─────────────────────────────────────── */
+
+    document.getElementById('gh-link').href            = repoBase;
+    document.getElementById('releases-link').href      = repoBase + '/releases';
+    document.getElementById('releases-hash-link').href = repoBase + '/releases';
+
+}());
+</script>
+
+</body>
+</html>

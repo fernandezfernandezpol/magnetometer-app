@@ -1,0 +1,852 @@
+/* =============================================================================
+   Mobile Magnetometer — Phone App Stylesheet  (mobile/styles.css)
+   =============================================================================
+   Target: Android Chrome PWA installed via "Add to Home Screen".
+   Layout: portrait-first, single-column, fills the entire viewport.
+
+   THEME — VS Code dark aesthetic
+   --------------------------------
+   All colours live in CSS custom properties on :root so every component
+   references the same palette.  Changing a single variable here updates the
+   whole UI.  No preprocessor is involved — these are native CSS variables.
+
+   Background layers:
+     --bg-base   #1e1e1e  outermost surface (matches VS Code editor bg)
+     --bg-panel  #252526  raised panels (VS Code side-bar bg)
+     --bg-panel2 #2d2d2d  secondary panels / inset areas
+     --bg-input  #3c3c3c  text inputs and dropdowns
+
+   Borders:
+     --border-dim   subtle separator used on all panel edges
+     --border-focus accent blue used for focused inputs
+
+   Text:
+     --text-main    #cccccc  body copy
+     --text-bright  #d4d4d4  emphasised / selected text
+     --text-dim     #858585  labels, hints, secondary information
+
+   Axis colours — identical across the phone app, the PC dashboard, and the
+   canvas chart so every visual representation uses the same encoding:
+     --ax-x     #ce9178  warm orange  (VS Code string literal colour)
+     --ax-y     #4ec9b0  teal         (VS Code type colour)
+     --ax-z     #9cdcfe  sky blue     (VS Code variable colour)
+     --ax-total #c586c0  purple       (VS Code keyword colour)
+
+   Semantic colours:
+     --ok     teal  — connected, armed, success
+     --err    red   — error, disconnected, recording active
+     --warn   yellow — transitional / warning states
+     --accent #007acc VS Code blue — interactive focus and highlights
+
+   Fonts:
+     --font-mono  Consolas/Courier New — numeric readouts, badges, labels
+     --font-sans  system UI stack      — prose, modals, info text
+   ============================================================================= */
+
+/* ── CSS custom properties (design tokens) ────────────────────────────────── */
+
+:root {
+    --bg-base:     #1e1e1e;
+    --bg-panel:    #252526;
+    --bg-panel2:   #2d2d2d;
+    --bg-input:    #3c3c3c;
+    --border-dim:  #3e3e42;
+    --border-focus:#007acc;
+
+    --text-main:   #cccccc;
+    --text-bright: #d4d4d4;
+    --text-dim:    #858585;
+
+    /* Axis colour palette */
+    --ax-x:     #ce9178;
+    --ax-y:     #4ec9b0;
+    --ax-z:     #9cdcfe;
+    --ax-total: #c586c0;
+
+    --ok:     #4ec9b0;
+    --err:    #f44747;
+    --warn:   #dcdcaa;
+    --accent: #007acc;
+
+    --font-mono: 'Consolas', 'Courier New', monospace;
+    --font-sans: -apple-system, 'Segoe UI', system-ui, sans-serif;
+}
+
+/* ── Global reset ─────────────────────────────────────────────────────────── */
+/*
+   box-sizing: border-box  — padding and border are included in declared width
+                             and height, avoiding overflow arithmetic surprises.
+   -webkit-tap-highlight-color: transparent — removes the semi-transparent blue
+                             flash that Android Chrome shows when tapping any
+                             element, giving a cleaner native-app feel.
+*/
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+/* ── Root element sizing ──────────────────────────────────────────────────── */
+/*
+   position: fixed on html AND body locks both elements to the viewport
+   rectangle.  Without this, iOS Safari rubber-bands the page when the user
+   drags past the top or bottom edge ("elastic overscroll"), which breaks the
+   fixed-layout feel of an installed PWA.  With position:fixed the document
+   cannot scroll at all — all scrollable regions must be explicit overflow:auto
+   children.
+
+   overflow: hidden reinforces the no-scroll intent and prevents any accidental
+   layout overflow from creating scrollbars on the root.
+
+   font-size: 13px is the VS Code default, kept here to match the aesthetic.
+   -webkit-font-smoothing: antialiased gives crisp subpixel rendering on macOS
+   and higher-DPI Android displays.
+*/
+html, body {
+    position: fixed;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background-color: var(--bg-base);
+    color: var(--text-main);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* ── iOS start overlay ────────────────────────────────────────────────────── */
+/*
+   iOS 13+ requires DeviceOrientationEvent.requestPermission() to be called
+   from a direct user gesture (a click/tap event handler).  The API cannot be
+   triggered programmatically on page load.  This full-screen overlay is shown
+   only on iOS (app.js adds display:flex via JS) so the user must tap "START"
+   before sensors are requested, satisfying the gesture requirement.
+
+   display:none here — JS switches it to display:flex when iOS is detected.
+   inset: 0 is shorthand for top:0 right:0 bottom:0 left:0.
+   z-index: 300 keeps it above the connection modal (z-index:200).
+*/
+#start-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+    background: var(--bg-base);
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    padding: 32px;
+    text-align: center;
+}
+
+/* Large monospaced brand wordmark on the start overlay */
+.overlay-logo {
+    font-family: var(--font-mono);
+    font-size: 2rem;
+    font-weight: bold;
+    color: var(--accent);
+    letter-spacing: 4px;
+}
+
+/* Smaller subtitle / tagline below the wordmark */
+.overlay-subtitle {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    letter-spacing: 3px;
+}
+
+/* Explanatory paragraph telling the user why the permission is needed */
+.overlay-info {
+    font-size: 0.9rem;
+    color: var(--text-main);
+    max-width: 260px;
+    line-height: 1.6;
+}
+
+/* The "START" button on the iOS overlay.  Ghost style (transparent bg,
+   solid border) so it reads as a deliberate action without looking alarming.
+   touch-action: manipulation disables the 300 ms tap delay on iOS. */
+#btn-start-sensor {
+    background: transparent;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    font-weight: bold;
+    letter-spacing: 3px;
+    padding: 16px 36px;
+    border-radius: 3px;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: background 0.15s;
+}
+/* Subtle fill on press — provides tactile feedback without a colour change */
+#btn-start-sensor:active { background: rgba(0, 122, 204, 0.15); }
+
+/* ── PC connection modal ──────────────────────────────────────────────────── */
+/*
+   The phone can optionally stream data to the PC server over WebSocket.
+   This modal collects the server IP address.  It is hidden by default;
+   app.js adds the .open class to show it.
+
+   The semi-transparent black backdrop (rgba 0,0,0,0.6) focuses attention on
+   the modal-box while keeping the app behind it visible for context.
+   z-index: 200 sits below the iOS start overlay (300) but above everything else.
+*/
+#connect-modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(0, 0, 0, 0.6);
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+/* JS adds this class to make the modal visible */
+#connect-modal.open { display: flex; }
+
+/* The white-card-equivalent panel inside the modal.
+   border-top: 2px accent blue gives a VS Code "active panel" header stripe. */
+.modal-box {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-dim);
+    border-top: 2px solid var(--accent);
+    border-radius: 4px;
+    padding: 24px;
+    width: 100%;
+    max-width: 340px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+/* CONNECT / SERVER title at the top of the modal */
+.modal-title {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    font-weight: bold;
+    letter-spacing: 2px;
+    color: var(--text-bright);
+}
+
+/* Descriptive body text and fine-print hint inside the modal */
+.modal-info       { font-size: 0.8rem; color: var(--text-main); line-height: 1.5; }
+.modal-info small { color: var(--text-dim); }
+.modal-hint       { font-size: 0.72rem; color: var(--text-dim); line-height: 1.5; }
+.modal-hint a     { color: var(--accent); }
+
+/* IP address text input — monospace so IP digits align cleanly.
+   outline:none removes the browser default focus ring; border-color transition
+   provides a VS Code-style blue underline instead. */
+#server-ip {
+    background: var(--bg-input);
+    border: 1px solid var(--border-dim);
+    color: var(--text-bright);
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    padding: 8px 10px;
+    border-radius: 3px;
+    width: 100%;
+    outline: none;
+    transition: border-color 0.15s;
+}
+#server-ip:focus { border-color: var(--border-focus); }
+
+/* Row holding the Connect and Cancel buttons side by side */
+.modal-btns { display: flex; gap: 10px; }
+/* Each button takes equal width inside the button row */
+.modal-btns .hardware-btn { flex: 1; }
+/* Cancel button is visually de-emphasised — dim colour, dim border */
+.btn-cancel { color: var(--text-dim) !important; border-color: var(--border-dim) !important; }
+
+/* ── Decorative grid background ───────────────────────────────────────────── */
+/*
+   Two overlaid CSS linear-gradients produce a fine dot-grid pattern that
+   reinforces the "engineering / telemetry" aesthetic without drawing attention
+   away from the data.
+
+   background-size: 32px 32px sets the spacing between grid lines.
+   pointer-events: none ensures the element never captures taps intended for
+   elements above it in the stacking order.
+   position:absolute with all edges at 0 fills its positioned parent (#app).
+   z-index: 0 keeps it below all UI (z-index: 1).
+*/
+#telemetry-grid-bg {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-image:
+        linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+    background-size: 32px 32px;
+    z-index: 0;
+    pointer-events: none;
+}
+
+/* ── App shell ────────────────────────────────────────────────────────────── */
+/*
+   The #app element is the primary flex column that stacks header → readouts
+   → chart → controls strip from top to bottom inside the viewport.
+
+   position:relative + z-index:1 places it on top of the decorative grid bg.
+
+   max-width: 1600px with margin:auto means the layout stays centred if the
+   phone is ever used in landscape on a tablet.
+
+   env(safe-area-inset-*) — iOS notch / home-indicator safe area values,
+   injected by the browser based on the physical device.  The max() call
+   ensures at least 12 px padding on devices that don't report safe areas.
+   This prevents content from sitting under the iPhone notch or the home bar.
+   The <meta name="viewport" content="viewport-fit=cover"> in index.html
+   must be present for env() values to be non-zero.
+*/
+#app {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: max(12px, env(safe-area-inset-top))
+             max(12px, env(safe-area-inset-right))
+             max(12px, env(safe-area-inset-bottom))
+             max(12px, env(safe-area-inset-left));
+    gap: 10px;
+}
+
+/* ── Header ───────────────────────────────────────────────────────────────── */
+/*
+   #sys-header is a single horizontal strip holding:
+     - the MOBILE MAGNETOMETER badge (brand / title)
+     - sensor status indicator (dot + text)
+     - PC connection status and button
+     - recording indicator dot
+   flex-wrap:wrap lets items reflow to a second line on very narrow screens.
+   flex-shrink:0 prevents the header from compressing when the chart grows.
+*/
+#sys-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-dim);
+    border-radius: 4px;
+    padding: 8px 14px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+}
+
+/* Generic flex row used inside the header for grouped elements */
+.header-block { display: flex; align-items: center; gap: 8px; }
+/* Takes all remaining horizontal space in the header */
+.info-block   { flex: 1; min-width: 0; }
+
+/* Accent-blue pill showing the app name — mirrors VS Code's "source control"
+   icon badge in the activity bar */
+.sys-title {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: bold;
+    color: var(--accent);
+    background: rgba(0, 122, 204, 0.12);
+    padding: 3px 8px;
+    border-radius: 3px;
+    border: 1px solid rgba(0, 122, 204, 0.3);
+    letter-spacing: 1.5px;
+}
+
+/* ALL-CAPS uppercase label — used for "HZ", "STATUS", etc. */
+.label { font-size: 10px; letter-spacing: 1px; color: var(--text-dim); text-transform: uppercase; }
+/* Monospace value next to a label — e.g. "50 Hz", "0.00 μT" */
+.value { font-family: var(--font-mono); font-size: 11px; color: var(--text-main); }
+/* Value highlighted in warning yellow — e.g. frequency during calibration */
+.value.highlight { color: var(--warn); }
+
+/* Pill container for a status dot + status text pair */
+.status-block {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    background: var(--bg-panel2);
+    padding: 3px 8px;
+    border-radius: 3px;
+    border: 1px solid var(--border-dim);
+}
+
+/* Outer ring element that centres the dot — keeps the hit target a bit larger */
+.status-indicator-ring {
+    width: 12px; height: 12px;
+    display: flex; align-items: center; justify-content: center;
+}
+
+/* The coloured circle indicator.  Transitions on colour and glow so state
+   changes fade smoothly rather than snapping.  Three states driven by JS:
+     (default)  dim grey  — initialising / unknown
+     .active    teal glow — sensor delivering data
+     .error     red glow  — sensor error or lost signal */
+.indicator-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background-color: var(--text-dim);
+    box-shadow: 0 0 5px var(--text-dim);
+    transition: background-color 0.3s, box-shadow 0.3s;
+}
+.indicator-dot.active { background-color: var(--ok);  box-shadow: 0 0 6px var(--ok); }
+.indicator-dot.error  { background-color: var(--err); box-shadow: 0 0 6px var(--err); }
+
+/* Monospace label to the right of the indicator dot */
+.status-text {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-bright);
+}
+
+/* ── PC connection status ─────────────────────────────────────────────────── */
+/*
+   .pc-block holds the "PC" button and a text status badge that cycles through
+   three states set by JS:
+     .offline  — no attempt, or failed
+     .linking  — connecting (blinks)
+     .linked   — WebSocket open and data flowing
+*/
+.pc-block { gap: 6px; }
+
+/* Ghost button for opening the connect modal */
+.pc-btn {
+    background: transparent;
+    border: 1px solid var(--border-dim);
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.5px;
+    padding: 3px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: all 0.15s;
+}
+.pc-btn:hover { border-color: var(--accent); color: var(--text-bright); }
+
+/* Text-only status for the PC link state */
+.pc-status { font-family: var(--font-mono); font-size: 11px; letter-spacing: 1px; }
+.pc-status.offline { color: var(--text-dim); }
+/* .linking blinks to convey active connection attempt */
+.pc-status.linking { color: var(--warn); animation: blink 0.8s infinite; }
+.pc-status.linked  { color: var(--ok); }
+
+/* "●REC" recording indicator dot — blinks red when a recording is active.
+   .hidden collapses it completely when not recording. */
+.rec-dot {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--err);
+    animation: blink 0.8s infinite;
+}
+.rec-dot.hidden { display: none; }
+
+/* Shared blink keyframe — dims elements to 20% opacity at the midpoint of
+   each 0.8 s cycle, giving a slow, deliberate pulse rather than a harsh flash */
+@keyframes blink { 50% { opacity: 0.2; } }
+
+/* ── Main dashboard grid ──────────────────────────────────────────────────── */
+/*
+   #dashboard is the flex child that grows to fill all remaining vertical space
+   beneath the fixed-height header.  min-height:0 is required on flex children
+   so they can shrink below their content size — without it, the chart would
+   push past the viewport on short screens.
+*/
+#dashboard {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    gap: 10px;
+    min-height: 0;
+}
+
+/* Responsive grid of readout panels.
+   auto-fit + minmax(160px, 1fr) means:
+     - as many columns as fit at ≥160 px each
+     - they stretch equally to fill the row
+   This gives 4 panels on a wide tablet, 2 on a phone, without media queries.
+   flex-shrink:0 prevents the grid from compressing when the chart below it
+   has a flex:1 claim on the remaining space. */
+#readouts-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+/* ── Panel ────────────────────────────────────────────────────────────────── */
+/*
+   Shared card style used for every readout, chart, and control group.
+   position:relative allows absolutely-positioned children (e.g. overlays).
+*/
+.panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-dim);
+    border-radius: 4px;
+    padding: 14px;
+    position: relative;
+}
+
+/* Spacing beneath the panel's title / label row */
+.panel-header { margin-bottom: 10px; }
+
+/* Coloured pill tag showing the axis name (X, Y, Z, |B|).
+   border: 1px solid currentColor means the border inherits whatever colour
+   class is applied (.x-axis, .y-axis, etc.) without needing a separate rule. */
+.axis-badge {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+    padding: 1px 5px;
+    border-radius: 2px;
+    border: 1px solid currentColor;
+    background: rgba(0, 0, 0, 0.2);
+}
+
+/* Flex row keeping the numeric value and its unit on the same baseline */
+.display-value-wrapper { display: flex; align-items: baseline; gap: 6px; margin-bottom: 10px; }
+
+/* Large numeric readout.
+   font-variant-numeric: tabular-nums — forces all digits to the same advance
+   width so the number doesn't jitter left/right as values change.
+   letter-spacing: -1px tightens wide monospace digits slightly. */
+.display-value {
+    font-family: var(--font-mono);
+    font-size: 2.4rem;
+    font-weight: 300;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -1px;
+}
+
+/* Larger variant used for the total-field (|B|) panel */
+.large-display { font-size: 3rem; font-weight: 300; }
+
+/* "μT" unit label next to the numeric value */
+.unit { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
+
+/* Thin horizontal bar that shows signal magnitude as a proportion of ±100 μT.
+   .progress-track is the grey background rail; .progress-fill is the coloured
+   indicator.  width is set inline by JS.  transition: width 0.1s linear gives
+   a smooth slide between sensor samples. */
+.progress-track {
+    width: 100%;
+    height: 2px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 1px;
+    margin: 10px 0;
+}
+.progress-fill {
+    height: 100%;
+    width: 0;
+    border-radius: 1px;
+    transition: width 0.1s linear;
+    opacity: 0.75;
+}
+
+/* ── Axis colour utilities ────────────────────────────────────────────────── */
+/*
+   These utility classes apply the axis colour in three ways:
+     .x-color / .y-color / … — set the CSS `color` property (text + SVG fill)
+     .x-bg / .y-bg / …       — set `background-color` (used on progress fills)
+     .x-axis / .y-axis / …   — tinted badge variant: coloured text, faint tinted
+                               background, and a matching low-opacity border
+*/
+
+/* Text colour utilities */
+.x-color     { color: var(--ax-x); }
+.y-color     { color: var(--ax-y); }
+.z-color     { color: var(--ax-z); }
+.total-color { color: var(--ax-total); }
+
+/* Background colour utilities — applied to .progress-fill elements */
+.x-bg    { background-color: var(--ax-x); }
+.y-bg    { background-color: var(--ax-y); }
+.z-bg    { background-color: var(--ax-z); }
+.total-bg { background-color: var(--ax-total); }
+
+/* Full axis badge variant: coloured text + translucent tint + border */
+.x-axis     { color: var(--ax-x);     background: rgba(206, 145, 120, 0.1); border-color: rgba(206, 145, 120, 0.3); }
+.y-axis     { color: var(--ax-y);     background: rgba(78,  201, 176, 0.1); border-color: rgba(78,  201, 176, 0.3); }
+.z-axis     { color: var(--ax-z);     background: rgba(156, 220, 254, 0.1); border-color: rgba(156, 220, 254, 0.3); }
+.total-axis { color: var(--ax-total); background: rgba(197, 134, 192, 0.1); border-color: rgba(197, 134, 192, 0.3); }
+
+/* ── Chart ────────────────────────────────────────────────────────────────── */
+/*
+   #chart-container is a flex child with flex:1, meaning it expands to fill all
+   vertical space not claimed by the readout grid and the controls strip.
+   min-height:0 again prevents flex overflow (same reason as #dashboard).
+   overflow:hidden clips the canvas at the container boundary.
+*/
+#chart-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* Row above the canvas holding the "WAVEFORM" label and the legend */
+.chart-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+/* "WAVEFORM" / "REAL-TIME TRACE" label above the chart */
+.chart-title {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+/* Container for the axis legend items; margin-left:auto pushes it to the
+   right end of the chart header row */
+.chart-legend { display: flex; gap: 12px; margin-left: auto; }
+
+/* Individual legend entry — a coloured swatch line + axis label.
+   cursor:pointer signals that clicking toggles the axis visibility. */
+.legend-item {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: color 0.15s;
+}
+.legend-item:hover { color: var(--text-bright); }
+
+/* The short horizontal coloured line inside each legend entry */
+.swatch { width: 16px; height: 2px; border-radius: 1px; }
+
+/*
+   #chart-wrap is the sized container for the <canvas> element.
+   flex:1 / min-height:150px ensures it gets at least a minimum drawable area.
+   The dual linear-gradient background produces the same dot-grid pattern as
+   the full-page decorative background, giving the chart a consistent look.
+   border: 1px solid rgba(255,255,255,0.04) — barely visible frame, enough
+   to define the chart boundary without competing with the data lines.
+*/
+#chart-wrap {
+    flex: 1;
+    position: relative;
+    width: 100%;
+    min-height: 150px;
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    background-image:
+        linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+    background-size: 32px 32px;
+}
+
+/*
+   The <canvas> is absolutely positioned so JS can read its container's
+   clientWidth/clientHeight and set the canvas intrinsic size accordingly,
+   enabling device-pixel-ratio-aware rendering without layout interference.
+*/
+#chart { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+
+/* ── Axis visibility toggle ───────────────────────────────────────────────── */
+/*
+   Any element with a [data-toggle] attribute acts as a click target that
+   toggles one axis on or off in both the chart and the readout panel.
+
+   When an axis is turned off, three visual changes occur:
+     1. The .readout-panel gets .axis-off → the whole panel fades to 20% opacity,
+        clearly indicating the axis is excluded from the display.
+     2. The .axis-badge or .legend-item for that axis gets .axis-off → it fades
+        and gains a strikethrough, mirroring the VS Code "disabled" convention.
+
+   user-select: none prevents text selection when users click the labels.
+*/
+[data-toggle] { cursor: pointer; user-select: none; transition: opacity 0.2s; }
+[data-toggle]:hover { opacity: 0.7; }
+
+/* Dim the entire readout panel for a hidden axis */
+.readout-panel.axis-off { opacity: 0.2; }
+
+/* Dim + strike through the badge / legend item for a hidden axis */
+.axis-badge.axis-off,
+.legend-item.axis-off {
+    opacity: 0.35;
+    text-decoration: line-through;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────────── */
+/*
+   .hardware-btn is used for high-stakes actions: Start/Stop Recording, Zero,
+   Connect.  The default style uses --err (red) text on a transparent background
+   with a dim border.  On hover it adds a red tint; on press it flips to a solid
+   red background with white text, giving strong tactile confirmation.
+
+   touch-action: manipulation — same as above, removes the 300 ms delay.
+*/
+.hardware-btn {
+    background: transparent;
+    border: 1px solid var(--border-dim);
+    color: var(--err);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    padding: 4px 12px;
+    border-radius: 3px;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: all 0.15s;
+    text-transform: uppercase;
+}
+.hardware-btn:hover  { background: rgba(244, 71, 71, 0.1); border-color: var(--err); }
+.hardware-btn:active { background: var(--err); color: #fff; }
+
+/* ── Controls strip ───────────────────────────────────────────────────────── */
+/*
+   The strip at the bottom of the screen holds sample-rate buttons, the Zero
+   calibration button, the Export button, and the REC button.
+   flex-shrink:0 keeps it at a fixed height; flex-wrap:wrap allows the buttons
+   to reflow to a second row on very narrow screens.
+*/
+#controls-strip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-dim);
+    border-radius: 4px;
+    padding: 7px 12px;
+    flex-wrap: wrap;
+}
+
+/* A logical group of related controls (e.g. all Hz buttons together) */
+.ctrl-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+/* Small uppercase label identifying a control group — e.g. "RATE:" */
+.ctrl-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-right: 2px;
+}
+
+/* Sample-rate selection buttons (10 / 20 / 50 Hz etc.).
+   .active state uses accent blue text and a faint blue background to show the
+   currently selected rate clearly. */
+.hz-btn {
+    background: transparent;
+    border: 1px solid var(--border-dim);
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: 3px;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: all 0.15s;
+}
+.hz-btn:hover  { border-color: var(--accent); color: var(--text-bright); }
+.hz-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(0, 122, 204, 0.1); }
+
+/* General-purpose control button (Zero, Export, etc.).
+   Lighter styling than .hardware-btn — these are operational rather than
+   safety-critical, so the red danger colour is not appropriate.
+   .ctrl-btn--active is applied by JS when a toggle (e.g. auto-export) is on,
+   using warning yellow so the active state is unmistakable. */
+.ctrl-btn {
+    background: transparent;
+    border: 1px solid var(--border-dim);
+    color: var(--text-main);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.3px;
+    padding: 3px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: all 0.15s;
+    text-transform: uppercase;
+}
+.ctrl-btn:hover  { border-color: var(--border-focus); color: var(--text-bright); }
+.ctrl-btn:active { background: rgba(0, 122, 204, 0.12); }
+/* Applied when a toggle button is in the "on" state */
+.ctrl-btn--active { border-color: var(--warn); color: var(--warn); background: rgba(220, 220, 170, 0.08); }
+
+/* ── Statistics row ───────────────────────────────────────────────────────── */
+/*
+   A 2-column micro-grid inside each readout panel that shows rolling
+   statistics (MIN, MAX, mean μ, standard deviation σ) computed from the
+   live data buffer.
+
+   .stat-cell: small darkened card for each stat.
+   .stat-lbl:  9 px uppercase label (MIN, MAX, μ, σ).
+   .stat-val:  11 px bright monospace number, tabular-nums so columns align.
+*/
+.stats-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 3px;
+    margin-top: 8px;
+}
+
+.stat-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+    background: rgba(0, 0, 0, 0.2);
+    padding: 3px 4px;
+    border-radius: 2px;
+}
+
+.stat-lbl {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    line-height: 1;
+}
+
+.stat-val {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-bright);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.3;
+}
+
+/* ── Responsive overrides ─────────────────────────────────────────────────── */
+/*
+   At ≤768 px (typical phone portrait width):
+     - Numeric readouts shrink slightly to fit within narrower panels.
+     - The readout grid locks to 2 columns (X, Y on row 1; Z, |B| on row 2).
+     - .total-panel spans both columns so the total-field readout gets more room.
+     - The header and chart header switch to column layout to avoid wrapping chaos.
+*/
+@media (max-width: 768px) {
+    .display-value  { font-size: 2rem; }
+    .large-display  { font-size: 2.5rem; }
+    #readouts-container { grid-template-columns: 1fr 1fr; }
+    .total-panel    { grid-column: span 2; }
+    #sys-header     { flex-direction: column; align-items: flex-start; }
+    .chart-header   { flex-direction: column; align-items: flex-start; gap: 8px; }
+}

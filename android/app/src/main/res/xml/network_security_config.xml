@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Allow plain ws:// WebSocket connections to the PC server on the LAN.
+     Android blocks cleartext HTTP by default since API 28; this overrides
+     that policy for a LAN-only measurement tool where TLS adds no real value. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+</network-security-config>

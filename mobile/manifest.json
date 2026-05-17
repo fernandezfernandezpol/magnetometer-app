@@ -1,0 +1,20 @@
+{
+    "name": "Mobile Magnetometer — Magnetic Field Telemetry",
+    "short_name": "Magnetometer",
+    "description": "Real-time magnetometer telemetry app for precision magnetic field measurements.",
+    "start_url": "./",
+    "display": "standalone",
+    "orientation": "portrait",
+    "theme_color": "#1e1e1e",
+    "background_color": "#1e1e1e",
+    "lang": "en",
+    "categories": ["utilities"],
+    "icons": [
+        {
+            "src": "compass.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "any maskable"
+        }
+    ]
+}

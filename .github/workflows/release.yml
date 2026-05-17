@@ -1,0 +1,150 @@
+# release.yml — Build & publish Mobile Magnetometer release artifacts.
+#
+# Trigger: push a version tag (e.g. v1.0.0).
+#   git tag v1.0.0
+#   git push origin v1.0.0
+#
+# Three parallel build jobs (Windows, Linux, Android), then a single release job
+# that attaches all artifacts and publishes SHA-256 checksums.
+#
+# Download page (docs/index.html) links to the latest release by fixed filename:
+#   Mobile-Magnetometer-Setup.exe
+#   Mobile-Magnetometer-x64.AppImage
+#   Mobile-Magnetometer-x64.deb
+#   Mobile-Magnetometer.apk
+
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+
+  # ── Windows installer (Electron + NSIS) ────────────────────────────────────
+  build-windows:
+    name: Build Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - name: Install dependencies
+        run: npm ci
+      - name: Build Electron installer
+        run: npm run build -- --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist-app/Mobile-Magnetometer-Setup.exe
+          if-no-files-found: error
+
+  # ── Linux packages (Electron — AppImage + deb) ─────────────────────────────
+  build-linux:
+    name: Build Linux packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - name: Install dependencies
+        run: npm ci
+      - name: Build Linux packages
+        run: npm run build:linux -- --publish never
+      - name: List dist-app
+        run: ls dist-app/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            dist-app/Mobile-Magnetometer-x64.AppImage
+            dist-app/Mobile-Magnetometer-x64.deb
+          if-no-files-found: error
+
+  # ── Android APK (Capacitor + Gradle) ───────────────────────────────────────
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - uses: actions/setup-java@v4
+        with: { java-version: '17', distribution: 'temurin' }
+      - name: Install Node.js dependencies
+        run: npm ci
+      - name: Sync Capacitor web assets
+        run: npx cap sync android
+      - name: Point Gradle at the pre-installed Android SDK
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+      - name: Build debug APK
+        working-directory: android
+        run: chmod +x gradlew && ./gradlew assembleDebug --no-daemon
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk Mobile-Magnetometer.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: Mobile-Magnetometer.apk
+          if-no-files-found: error
+
+  # ── GitHub Release ──────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: [build-windows, build-linux, build-android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: windows-installer }
+      - uses: actions/download-artifact@v4
+        with: { name: linux-packages }
+      - uses: actions/download-artifact@v4
+        with: { name: android-apk }
+
+      - name: Compute SHA-256 checksums
+        id: hashes
+        run: |
+          EXE=$(sha256sum Mobile-Magnetometer-Setup.exe | awk '{print $1}')
+          APK=$(sha256sum Mobile-Magnetometer.apk       | awk '{print $1}')
+          APP=$(sha256sum Mobile-Magnetometer-x64.AppImage 2>/dev/null | awk '{print $1}' || echo 'n/a')
+          DEB=$(sha256sum Mobile-Magnetometer-x64.deb      2>/dev/null | awk '{print $1}' || echo 'n/a')
+          echo "exe=$EXE" >> $GITHUB_OUTPUT
+          echo "apk=$APK" >> $GITHUB_OUTPUT
+          echo "app=$APP" >> $GITHUB_OUTPUT
+          echo "deb=$DEB" >> $GITHUB_OUTPUT
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Mobile-Magnetometer-Setup.exe
+            Mobile-Magnetometer-x64.AppImage
+            Mobile-Magnetometer-x64.deb
+            Mobile-Magnetometer.apk
+          generate_release_notes: true
+          body: |
+            ## Downloads
+
+            | File | Platform | SHA-256 |
+            |------|----------|---------||
+            | `Mobile-Magnetometer-Setup.exe` | Windows 10/11 (x64) | `${{ steps.hashes.outputs.exe }}` |
+            | `Mobile-Magnetometer-x64.AppImage` | Linux (x64, universal) | `${{ steps.hashes.outputs.app }}` |
+            | `Mobile-Magnetometer-x64.deb` | Ubuntu / Debian (x64) | `${{ steps.hashes.outputs.deb }}` |
+            | `Mobile-Magnetometer.apk` | Android 5.1+ (API 22+) | `${{ steps.hashes.outputs.apk }}` |
+
+            **Install:**
+            - **Windows** — run `Mobile-Magnetometer-Setup.exe`, complete the wizard.
+            - **Linux (AppImage)** — `chmod +x Mobile-Magnetometer-x64.AppImage && ./Mobile-Magnetometer-x64.AppImage`
+            - **Linux (deb)** — `sudo dpkg -i Mobile-Magnetometer-x64.deb`
+            - **Android** — transfer the APK to your phone, enable *Install unknown apps*, open the file.
+
+            **Verify integrity:**
+            ```bash
+            sha256sum Mobile-Magnetometer-Setup.exe
+            sha256sum Mobile-Magnetometer-x64.AppImage
+            sha256sum Mobile-Magnetometer.apk
+            ```

@@ -1,0 +1,14 @@
+{
+  "appId": "com.mobilemagnetometer.app",
+  "appName": "Mobile Magnetometer",
+  "webDir": "mobile",
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 0
+    }
+  }
+}
